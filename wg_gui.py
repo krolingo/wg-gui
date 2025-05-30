@@ -9,8 +9,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QSystemTrayIcon, QMenu
 )
 from PyQt6.QtCore import QProcess, Qt, QTimer
-from PyQt6.QtGui import QFont, QIcon, QAction, QTextCursor
-
+from PyQt6.QtGui import QFont, QIcon, QAction, QTextCursor, QPixmap, QPainter, QColor
 
 # Configuration
 WG_DIR = os.path.expanduser("~/scripts/wireguard_client/profiles")
@@ -34,9 +33,10 @@ def time_ago(epoch):
 def parse_wg_show():
     iface_info, peer_info = {}, {}
     try:
-        out = subprocess.check_output(["wg", "show", SYSTEM_IFACE]).decode().strip()
+        out = subprocess.check_output(
+            ["wg", "show", SYSTEM_IFACE],
+        ).decode().strip()
         lines = out.splitlines()
-
         for line in lines:
             line = line.strip()
             if line.lower().startswith("interface:"):
@@ -52,16 +52,9 @@ def parse_wg_show():
             elif line.startswith("allowed ips:"):
                 peer_info['allowed_ips'] = line.split(":", 1)[1].strip()
             elif line.startswith("latest handshake:"):
-                raw = line.split(":", 1)[1].strip()
-                peer_info['handshake'] = raw if raw != "0 seconds ago" else "-"
+                peer_info['handshake'] = line.split(":", 1)[1].strip()
             elif line.startswith("transfer:"):
                 peer_info['transfer'] = line.split(":", 1)[1].strip()
-
-    except subprocess.CalledProcessError:
-        pass
-
-        return iface_info, peer_info
-
     except subprocess.CalledProcessError:
         pass
     return iface_info, peer_info
@@ -130,7 +123,8 @@ QListWidget, QTextEdit {
     color: #e6e6e6;
 }
 QListWidget::item {
-    padding: 5px 10px;
+    padding: 2px 8px;
+    min-height: 16px;
 }
 QListWidget::item:selected {
     background: #384452;
@@ -164,7 +158,6 @@ QLabel {
 QSplitter::handle {
     background: #23272a;
 }
-
 /* --- Custom Narrow Scrollbars --- */
 QScrollBar:vertical {
     border: none;
@@ -185,7 +178,6 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background: none;
 }
-
 /* Horizontal */
 QScrollBar:horizontal {
     border: none;
@@ -206,6 +198,16 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
     background: none;
 }
+
+QListWidget::item { padding: 0 0px; min-height: 7px; }
+
+QLabel.data-label {
+    color: #d2f8d2;
+    font-weight: Normal;
+    font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+    font-size: 14px;
+}
+
 """
 
 class WGGui(QWidget):
@@ -231,6 +233,11 @@ class WGGui(QWidget):
         self.tray_icon.show()
 
         self.list = QListWidget()
+        list_font = QFont()
+        list_font.setPointSize(8)  # Try 9 or 8 for even smaller rows
+        self.list.setFont(list_font)
+
+        self.list.setSpacing(0)
         self.list.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.list.setMinimumWidth(300)
         self.list.setMaximumWidth(300)
@@ -241,10 +248,11 @@ class WGGui(QWidget):
 
         self.intf_group = QGroupBox("Interface Details")
         intf_form = QFormLayout()
+        intf_form.setVerticalSpacing(8)
         intf_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         intf_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        intf_form.setHorizontalSpacing(20)
-
+        intf_form.setHorizontalSpacing(24)
+        intf_form.setVerticalSpacing(7)
         self.lbl_status = QLabel()
         self.lbl_pubkey = QLabel()
         self.lbl_port = QLabel()
@@ -252,11 +260,14 @@ class WGGui(QWidget):
         self.lbl_dns = QLabel()
 
         for lbl in (self.lbl_status, self.lbl_pubkey, self.lbl_port,
+                    
                     self.lbl_addresses, self.lbl_dns):
             lbl.setFont(label_font)
+            lbl.setProperty("class", "data-label")
             lbl.setWordWrap(False)
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            lbl.setMinimumHeight(22)
 
         for name, widget in [
             ("Status:", self.lbl_status),
@@ -270,10 +281,11 @@ class WGGui(QWidget):
 
         self.peer_group = QGroupBox("Peer Details")
         peer_form = QFormLayout()
+        peer_form.setVerticalSpacing(8)
         peer_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         peer_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        peer_form.setHorizontalSpacing(20)
-
+        peer_form.setHorizontalSpacing(24)
+        peer_form.setVerticalSpacing(7)
         self.lbl_peer_key = QLabel()
         self.lbl_allowed_ips = QLabel()
         self.lbl_endpoint = QLabel()
@@ -283,12 +295,14 @@ class WGGui(QWidget):
         for lbl in (self.lbl_peer_key, self.lbl_allowed_ips,
                     self.lbl_endpoint, self.lbl_handshake, self.lbl_transfer):
             lbl.setFont(label_font)
+            lbl.setProperty("class", "data-label")
             lbl.setWordWrap(True)
             lbl.setMinimumWidth(460)
             lbl.setMaximumWidth(10000)
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
             lbl.setMaximumHeight(1000)
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            lbl.setMinimumHeight(22)
 
         for name, widget in [
             ("Public Key:", self.lbl_peer_key),
@@ -328,6 +342,26 @@ class WGGui(QWidget):
         right_layout.addWidget(self.intf_group)
         right_layout.addWidget(self.peer_group)
         right_layout.addStretch()
+        def match_groupbox_widths():
+            intf_width = self.intf_group.sizeHint().width()
+            peer_width = self.peer_group.sizeHint().width()
+            widest = max(intf_width, peer_width, 520)
+            self.intf_group.setMinimumWidth(widest)
+            self.peer_group.setMinimumWidth(widest)
+            intf_form: QFormLayout = self.intf_group.layout()
+            peer_form: QFormLayout = self.peer_group.layout()
+            label_w = max(
+                intf_form.labelForField(self.lbl_status).sizeHint().width(),
+                peer_form.labelForField(self.lbl_peer_key).sizeHint().width(),
+                110
+            )
+            for form in [intf_form, peer_form]:
+                for i in range(form.rowCount()):
+                    label = form.itemAt(i, QFormLayout.ItemRole.LabelRole).widget()
+                    if label:
+                        label.setMinimumWidth(label_w)
+                        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        match_groupbox_widths()
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left)
@@ -394,8 +428,6 @@ class WGGui(QWidget):
         )
         event.ignore()
 
-    # ... rest of your methods below ...
-
     def load_profiles(self):
         self.list.clear()
         for conf in sorted(os.listdir(WG_DIR)):
@@ -414,16 +446,20 @@ class WGGui(QWidget):
             itm = self.list.item(i)
             prof = itm.data(Qt.ItemDataRole.UserRole)
             font = QFont()
-            if up and prof == self.active_profile:
-                icon = "🟢"
-                font.setBold(True)
-                label = ""
-            else:
-                icon = "⚪"
-                font.setBold(False)
-                label = ""
+            font.setBold(up and prof == self.active_profile)
+            # Draw a small circle as icon (mac-style)
+            size = 10
+            pixmap = QPixmap(size, size)
+            pixmap.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pixmap)
+            color = QColor('#60FF60') if (up and prof == self.active_profile) else QColor('#FFFFFF')
+            painter.setBrush(color)
+            painter.setPen(Qt.GlobalColor.transparent)
+            painter.drawEllipse(0, 0, size, size)
+            painter.end()
+            itm.setIcon(QIcon(pixmap))
             itm.setFont(font)
-            itm.setText(f"{icon} {prof}{label}")
+            itm.setText(prof)
         self.update_detail_panel()
 
     def is_interface_up(self):
@@ -453,6 +489,7 @@ class WGGui(QWidget):
         if not show_profile:
             return
         conf_path = os.path.join(WG_DIR, f"{show_profile}.conf")
+        conf_port = "-"
         if os.path.exists(conf_path):
             iface_conf, peer_conf = parse_wg_conf(conf_path)
             self.lbl_addresses.setText(", ".join(iface_conf.get('addresses', [])) or "-")
@@ -460,20 +497,17 @@ class WGGui(QWidget):
             self.lbl_peer_key.setText(peer_conf.get('pubkey', "-"))
             self.lbl_allowed_ips.setText(peer_conf.get('allowed_ips', "-"))
             self.lbl_endpoint.setText(peer_conf.get('endpoint', "-"))
-            self.lbl_port.setText(iface_conf.get('port', "-"))
+            conf_port = iface_conf.get('port', "-")
+            self.lbl_port.setText(conf_port)
         if self.is_interface_up() and show_profile == self.active_profile:
             iface, peer = self.parse_wg_show()
             self.lbl_status.setText("Up")
             self.lbl_pubkey.setText(iface.get('pubkey', "-"))
-            self.lbl_port.setText(iface.get('port', "-"))
+            self.lbl_port.setText(iface.get('port') or conf_port or "-")
             self.lbl_handshake.setText(peer.get('handshake', "-"))
             self.lbl_transfer.setText(peer.get('transfer', "-"))
         else:
             self.lbl_status.setText("Down")
-            if os.path.exists(conf_path):
-                iface_conf, _ = parse_wg_conf(conf_path)
-                self.lbl_pubkey.setText("-")
-                # self.lbl_port.setText(iface_conf.get('port', "-"))
 
     def on_connect(self):
         itm = self.list.currentItem()
