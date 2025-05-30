@@ -90,7 +90,7 @@ chmod +x wg_gui.py
 
 ---
 
-##  Switching Profiles\
+##  Switching Profiles
 
 * When you select a new profile, the previous connection is cleanly disconnected, and the new one is brought up.  
   If the interface is already active, it is torn down first.
