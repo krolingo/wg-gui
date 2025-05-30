@@ -405,8 +405,6 @@ class WGGui(QWidget):
         )
         event.ignore()
 
-    # ... rest of your methods below ...
-
     def load_profiles(self):
         self.list.clear()
         for conf in sorted(os.listdir(WG_DIR)):
