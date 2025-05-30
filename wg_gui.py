@@ -34,45 +34,34 @@ def time_ago(epoch):
 def parse_wg_show():
     iface_info, peer_info = {}, {}
     try:
-        out = subprocess.check_output(
-            ["wg", "show", SYSTEM_IFACE, "dump"],
-        ).decode().strip()
+        out = subprocess.check_output(["wg", "show", SYSTEM_IFACE]).decode().strip()
         lines = out.splitlines()
-        if lines:
-            iface_parts = lines[0].split()
-            iface_info = {
-                'pubkey': iface_parts[1],
-                'port': iface_parts[3],
-            }
-            if len(lines) > 1:
-                peer_parts = lines[1].split()
-                peer_pubkey = peer_parts[0] if peer_parts[0] != '(none)' else '-'
-                allowed_ips = peer_parts[3] if len(peer_parts) > 3 else '-'
-                endpoint = peer_parts[2] if len(peer_parts) > 2 else '-'
 
-                try:
-                    epoch = int(peer_parts[4])
-                    if 1000000000 < epoch < 2000000000:
-                        handshake = time_ago(epoch)
-                    else:
-                        handshake = '-'
-                except (ValueError, IndexError):
-                    handshake = '-'
+        for line in lines:
+            line = line.strip()
+            if line.lower().startswith("interface:"):
+                iface_info['name'] = line.split(":", 1)[1].strip()
+            elif line.startswith("public key:"):
+                iface_info['pubkey'] = line.split(":", 1)[1].strip()
+            elif line.startswith("listening port:"):
+                iface_info['port'] = line.split(":", 1)[1].strip()
+            elif line.startswith("peer:"):
+                peer_info['pubkey'] = line.split(":", 1)[1].strip()
+            elif line.startswith("endpoint:"):
+                peer_info['endpoint'] = line.split(":", 1)[1].strip()
+            elif line.startswith("allowed ips:"):
+                peer_info['allowed_ips'] = line.split(":", 1)[1].strip()
+            elif line.startswith("latest handshake:"):
+                raw = line.split(":", 1)[1].strip()
+                peer_info['handshake'] = raw if raw != "0 seconds ago" else "-"
+            elif line.startswith("transfer:"):
+                peer_info['transfer'] = line.split(":", 1)[1].strip()
 
-                try:
-                    rx = int(peer_parts[5])
-                    tx = int(peer_parts[6])
-                    transfer = f"{rx / 1024:.2f} KiB RX, {tx / 1024:.2f} KiB TX"
-                except (ValueError, IndexError):
-                    transfer = "-"
+    except subprocess.CalledProcessError:
+        pass
 
-                peer_info = {
-                    'pubkey': peer_pubkey,
-                    'allowed_ips': allowed_ips,
-                    'endpoint': endpoint,
-                    'handshake': handshake,
-                    'transfer': transfer
-                }
+        return iface_info, peer_info
+
     except subprocess.CalledProcessError:
         pass
     return iface_info, peer_info
@@ -404,6 +393,8 @@ class WGGui(QWidget):
             2000
         )
         event.ignore()
+
+    # ... rest of your methods below ...
 
     def load_profiles(self):
         self.list.clear()
