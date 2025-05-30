@@ -1,4 +1,4 @@
-# WireGuard GUI Client for FreeBSD/Linux
+# WireGuard GUI Client for FreeBSD
 ![Screenshot](images/screenshot1.png)
 
 
