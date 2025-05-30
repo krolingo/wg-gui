@@ -1,5 +1,5 @@
 # WireGuard GUI Client for FreeBSD/Linux
-![Screenshot](images/screenshot.png1)
+![Screenshot](images/screenshot1.png)
 
 
 This is a PyQt6-based graphical interface for managing WireGuard VPN profiles. It allows you to easily view connection details, switch between profiles, connect/disconnect from the VPN, and see live logs.
