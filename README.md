@@ -13,6 +13,12 @@ This is a PyQt6-based graphical interface for managing WireGuard VPN profiles. I
 * Logs with `ping` test support
 * Responsive PyQt6 interface
 * Selectable labels and scrollable info areas
+* Improved styling via QSS (Qt stylesheets)
+* Clean separation between profile list and details
+- Selectable labels and scrollable info areas
+- Logs with live `ping` output for connectivity checks [if configured]
+- Does **not** disconnect on window close; connection persists unless manually disconnected  
+
 
 ---
 
@@ -23,6 +29,8 @@ The application expects:
 * WireGuard profile configs in: `~/scripts/wireguard_client/profiles/*.conf`
 * Runtime config copy to: `/usr/local/etc/wireguard/wg0.conf`
 * Interface name is assumed to be `wg0`
+* **App icon:** `wireguard.png` (use your own if you wish, placed next to `wg_gui.py`)
+
 
 ---
 
@@ -82,17 +90,20 @@ chmod +x wg_gui.py
 
 ---
 
-##  Switching Profiles
+##  Switching Profiles\
 
-When switching between profiles, the current connection is automatically disconnected, and the selected one is brought up. If the interface is already active, it is torn down first.
+* When you select a new profile, the previous connection is cleanly disconnected, and the new one is brought up.  
+  If the interface is already active, it is torn down first.
 
-Your WireGuard profile can include an optional line:
+* **Connection persistence:**  
+  If you close the GUI window, your VPN connection **remains up** — it is not torn down unless you explicitly click "Disconnect".
 
-```ini
-#ping 10.0.1.1
-```
-
-to test post-connection reachability.
+* **Optional:**  
+  Your WireGuard profile can include a line like  
+  ```
+  #ping 10.0.1.1
+  ```
+  to test post-connection reachability, with the ping output visible in the log area.
 
 ---
 
@@ -120,11 +131,24 @@ This project was created to:
 
 * Simplify switching between multiple WireGuard configs
 * Provide a visual interface for monitoring connection details
-* Avoid the complexity of existing bulky GUIs or terminal-only tools
+* Fill the gap for non existing other GUIs or terminal-only tools
+* Built with PyQt6 for easy tweaking (stylesheets, icons, layout) and portability
 
 It's built with PyQt6 for ease of use, portability, and extensibility.
 
 ---
 
-##  License
-Use as you please.
+## Customization
+
+* **App Icon:**  
+  Place your own PNG as `wireguard.png` alongside `wg_gui.py` to change the window icon.
+* **Styles:**  
+  Easily tweak appearance via the `APP_STYLESHEET` section in the script.
+* **Tray Mode:**  
+  (Experimental) Tray icon support can be added; see comments in the script.
+
+---
+
+## License
+Use as you please. No restrictions.
+
