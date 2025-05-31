@@ -128,9 +128,9 @@
 * Left-click the tray icon to toggle visibility of the main window.
 * Right-click the tray icon for quick access:
 
-👁 Show
-🔌 Disconnect
-🚭 Disconnect & Quit
+* 👁 Show
+* 🔌 Disconnect
+* 🚭 Disconnect & Quit
   
 ##  Why This Exists
   
