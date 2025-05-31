@@ -100,7 +100,9 @@ QWidget {
     background: #232427;
     color: #ddd;
     font-family: "IBM Plex Sans Medium","JetBrains Mono", monospace;
-    font-size: 14px;
+    /* font-size: 15px; */
+    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+
 }
 QGroupBox {
     border: 1px solid #444;
@@ -199,13 +201,42 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
     background: none;
 }
 
-QListWidget::item { padding: 0 0px; min-height: 7px; }
+QListWidget::item { 
+    padding: 0 0px; 
+    min-height: 7px;
+    }
 
 QLabel.data-label {
-    color: #d2f8d2;
-    font-weight: Normal;
-    font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
-    font-size: 14px;
+    /* color: #d2f8d2;*/
+    color: #ffffff;
+    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
+    /*font-size: 14px;*/
+    text-shadow: 2px 2px 2px rgba(0, 0, 0, 0);
+
+}
+
+#profileList {
+    background: #1c1e22;
+    border: 1px solid #444;
+    color: #d8d8d8;
+    font-size: 12px;
+    padding: 2px;
+}
+
+#profileList::item {
+    padding: 4px 10px;
+    min-height: 22px;
+}
+
+#profileList::item:selected {
+    background: #375a7f;
+    color: #ffffff;
+    border: 1px solid #60b8ff;
+}
+
+#profileList::item:!selected {
+    background: #1c1e22;
+    color: #b0b0b0;
 }
 
 """
@@ -213,42 +244,101 @@ QLabel.data-label {
 class WGGui(QWidget):
     def __init__(self):
         super().__init__()
+        # --- Robust icon resource location ---
+        icon_names = ["wireguard_off.png", "wg_connected.png"]
+        icon_paths = []
+
+        # Try all possible locations where the icons might live
+        candidate_dirs = []
+        if getattr(sys, 'frozen', False):
+            bundle_dir = os.path.dirname(sys.executable)
+            candidate_dirs.append(os.path.normpath(os.path.join(bundle_dir, '..', 'Resources', 'Icons')))
+        candidate_dirs.append(os.path.join(os.path.dirname(__file__), "Icons"))
+        # Just in case, check also a flat 'Resources/Icons' under cwd
+        candidate_dirs.append(os.path.join(os.getcwd(), "Resources", "Icons"))
+
+        resource_dir = None
+        for d in candidate_dirs:
+            missing = [name for name in icon_names if not os.path.exists(os.path.join(d, name))]
+            if not missing:
+                resource_dir = d
+                break
+        if not resource_dir:
+            # Give up: show dialog, print error, exit
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "WireGuardClient Error",
+                "Can't find required icon files in:\n\n" +
+                "\n".join(candidate_dirs) +
+                "\n\nMissing files: " + ", ".join(icon_names)
+            )
+            sys.exit(2)
+        print("USING ICON DIR:", resource_dir)
+        print("ICON FILES:", os.listdir(resource_dir))
+
+        self.icon_disconnected_path = os.path.join(resource_dir, "wireguard_off.png")
+        self.icon_connected_path = os.path.join(resource_dir, "wg_connected.png")
+
+        # Initialize active_profile early so update_tray_icon never errors
+        self.active_profile = None
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), "wireguard.png")))
         self.setWindowTitle("WireGuard Client")
         self.resize(800, 600)
 
         # ----- System Tray Setup -----
-        self.tray_icon = QSystemTrayIcon(QIcon.fromTheme("network-vpn", QIcon()))
-        self.tray_icon.setToolTip("WireGuard Client")
+
+        # Set icon paths for connected/disconnected states
+        self.icon_disconnected_path = os.path.join(resource_dir, "wireguard_off.png")
+        self.icon_connected_path = os.path.join(resource_dir, "wg_connected.png")
+        # Debug print for icon path existence
+        print("DEBUG: Loading tray icon from", self.icon_disconnected_path, "exists:", os.path.exists(self.icon_disconnected_path), file=sys.stderr)
+        # Initialize tray icon with the disconnected icon
+        disconnected_icon = QIcon(self.icon_disconnected_path)
+        self.tray_icon = QSystemTrayIcon(disconnected_icon, self)
+        # Explicitly set the icon to make sure it’s recognized
+        self.tray_icon.setIcon(QIcon(self.icon_disconnected_path))
+        # Ensure the tray icon is visible
+        self.tray_icon.show()
+        # Update icon based on current status
+        self.update_tray_icon()
+
+        # Build the context menu with emoji-prefixed QAction entries
         tray_menu = QMenu()
-        self.action_show = QAction("Show")
-        self.action_quit = QAction("Disconnect && Quit")
-        tray_menu.addAction(self.action_show)
+        act_show = QAction("👁 Show", self)
+        act_disconnect = QAction("🔌 Disconnect", self)
+        act_quit = QAction("🚭 Disconnect & Quit", self)
+
+        tray_menu.addAction(act_show)
+        tray_menu.addAction(act_disconnect)
         tray_menu.addSeparator()
-        tray_menu.addAction(self.action_quit)
+        tray_menu.addAction(act_quit)
+
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.on_tray_activated)
-        self.action_show.triggered.connect(self.show_and_raise)
-        self.action_quit.triggered.connect(self.quit_and_disconnect)
+
+        # Connect actions to methods
+        act_show.triggered.connect(self.show_and_raise)
+        act_disconnect.triggered.connect(self.on_disconnect)
+        act_quit.triggered.connect(self.quit_and_disconnect)
+
         self.tray_icon.show()
 
         self.list = QListWidget()
         list_font = QFont()
-        list_font.setPointSize(8)  # Try 9 or 8 for even smaller rows
+        list_font.setPointSize(11)  # Try 9 or 8 for even smaller rows
         self.list.setFont(list_font)
 
-        self.list.setSpacing(0)
+        self.list.setSpacing(-1)
         self.list.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.list.setMinimumWidth(300)
         self.list.setMaximumWidth(300)
         self.list.currentItemChanged.connect(self.update_detail_panel)
 
         label_font = QFont()
-        label_font.setBold(False)
+        label_font.setBold(True)
 
         self.intf_group = QGroupBox("Interface Details")
         intf_form = QFormLayout()
-        intf_form.setVerticalSpacing(8)
+        intf_form.setVerticalSpacing(4)
         intf_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         intf_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
         intf_form.setHorizontalSpacing(24)
@@ -267,7 +357,7 @@ class WGGui(QWidget):
             lbl.setWordWrap(False)
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            lbl.setMinimumHeight(22)
+            lbl.setMinimumHeight(16)
 
         for name, widget in [
             ("Status:", self.lbl_status),
@@ -281,7 +371,7 @@ class WGGui(QWidget):
 
         self.peer_group = QGroupBox("Peer Details")
         peer_form = QFormLayout()
-        peer_form.setVerticalSpacing(8)
+        peer_form.setVerticalSpacing(4)
         peer_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         peer_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
         peer_form.setHorizontalSpacing(24)
@@ -364,6 +454,7 @@ class WGGui(QWidget):
         match_groupbox_widths()
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setMinimumHeight(400)
         splitter.addWidget(left)
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
@@ -405,7 +496,10 @@ class WGGui(QWidget):
 
     def on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            self.show_and_raise()
+            if self.isVisible():
+                self.hide()
+            else:
+                self.show_and_raise()
 
     def show_and_raise(self):
         self.showNormal()
@@ -427,7 +521,19 @@ class WGGui(QWidget):
             2000
         )
         event.ignore()
-
+    def update_tray_icon(self):
+        # Show connected icon only when a profile is active and the interface is up
+        if self.active_profile and self.is_interface_up():
+            path = self.icon_connected_path
+            tooltip = "WireGuard (Connected)"
+        else:
+            path = self.icon_disconnected_path
+            tooltip = "WireGuard (Disconnected)"
+        icon = QIcon(path)
+        self.tray_icon.setIcon(icon)
+        self.tray_icon.setToolTip(tooltip)
+    
+    
     def load_profiles(self):
         self.list.clear()
         for conf in sorted(os.listdir(WG_DIR)):
@@ -436,7 +542,7 @@ class WGGui(QWidget):
                 item = QListWidgetItem(profile)
                 item.setData(Qt.ItemDataRole.UserRole, profile)
                 font = QFont()
-                font.setBold(False)
+                font.setBold(True)
                 item.setFont(font)
                 self.list.addItem(item)
 
@@ -461,6 +567,9 @@ class WGGui(QWidget):
             itm.setFont(font)
             itm.setText(prof)
         self.update_detail_panel()
+        # Tray icon connected
+        self.update_tray_icon()
+
 
     def is_interface_up(self):
         try:
@@ -529,6 +638,9 @@ class WGGui(QWidget):
         self.commands, self.cmd_index = cmds, 0
         self.log.clear()
         self.run_next()
+        # Tray icon disconnected
+        self.update_tray_icon()
+
 
     def on_disconnect(self):
         self.commands, self.cmd_index = [["wg-quick","down",SYSTEM_IFACE]], 0
