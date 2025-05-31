@@ -165,22 +165,20 @@ def parse_wg_conf(profile_path):
                     interface['port'] = v
     return interface, peer
 
-APP_STYLESHEET = """
+APP_STYLESHEET_DARK = """
 QWidget {
     background: #232427;
     color: #ddd;
     font-family: "IBM Plex Sans Medium","JetBrains Mono", monospace;
-    /* font-size: 15px; */
     text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
-
 }
 QGroupBox {
     border: 1px solid #444;
     border-radius: 6px;
-    margin-top: 12px;
     background: #232427;
     font-weight: bold;
-    padding-top: 8px;
+    margin-top: 20px;       /* previously 12px */
+    padding-top: 4px;       /* previously 8px */
 }
 QGroupBox::title {
     subcontrol-origin: margin;
@@ -195,8 +193,8 @@ QListWidget, QTextEdit {
     color: #e6e6e6;
 }
 QListWidget::item {
-    padding: 2px 8px;
-    min-height: 16px;
+    padding: 0 0px;
+    min-height: 7px;
 }
 QListWidget::item:selected {
     background: #384452;
@@ -230,12 +228,11 @@ QLabel {
 QSplitter::handle {
     background: #23272a;
 }
-/* --- Custom Narrow Scrollbars --- */
 QScrollBar:vertical {
     border: none;
     background: #232427;
     width: 8px;
-    margin: 2px 0 2px 0;
+    margin: 2px 0;
 }
 QScrollBar::handle:vertical {
     background: #4f6377;
@@ -250,12 +247,11 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
     background: none;
 }
-/* Horizontal */
 QScrollBar:horizontal {
     border: none;
     background: #232427;
     height: 8px;
-    margin: 0 2px 0 2px;
+    margin: 0 2px;
 }
 QScrollBar::handle:horizontal {
     background: #4f6377;
@@ -270,21 +266,11 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
     background: none;
 }
-
-QListWidget::item { 
-    padding: 0 0px; 
-    min-height: 7px;
-    }
-
 QLabel.data-label {
-    /* color: #d2f8d2;*/
     color: #ffffff;
     font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
-    /*font-size: 14px;*/
     text-shadow: 2px 2px 2px rgba(0, 0, 0, 0);
-
 }
-
 #profileList {
     background: #1c1e22;
     border: 1px solid #444;
@@ -292,23 +278,115 @@ QLabel.data-label {
     font-size: 12px;
     padding: 2px;
 }
-
 #profileList::item {
     padding: 4px 10px;
     min-height: 22px;
 }
-
 #profileList::item:selected {
     background: #375a7f;
     color: #ffffff;
     border: 1px solid #60b8ff;
 }
-
 #profileList::item:!selected {
     background: #1c1e22;
     color: #b0b0b0;
 }
+"""
 
+APP_STYLESHEET_LIGHT = """
+QWidget {
+    background: #f4f4f4;
+    color: #111;
+    font-family: "IBM Plex Sans", "JetBrains Mono", monospace;
+}
+QGroupBox {
+    border: 1px solid #aaa;
+    border-radius: 6px;
+    background: #ffffff;
+    font-weight: bold;
+    margin-top: 20px;       /* previously 12px */
+    padding-top: 4px;       /* previously 8px */
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 4px;
+    background: transparent;
+    color: #0050aa;
+}
+QListWidget, QTextEdit {
+    background: #ffffff;
+    border: 1px solid #ccc;
+    color: #111;
+}
+QListWidget::item {
+    padding: 0 0px;
+    min-height: 7px;
+}
+QListWidget::item:selected {
+    background: #cce0ff;
+    color: #000;
+    border: 1px solid #3399ff;
+}
+QListWidget::item:!selected {
+    background: #ffffff;
+    color: #444;
+}
+QPushButton {
+    background: #e0e0e0;
+    color: #000;
+    border: 1px solid #999;
+    padding: 5px 18px;
+    border-radius: 5px;
+    font-weight: bold;
+}
+QPushButton:hover {
+    background: #cce0ff;
+    color: #000;
+    border: 1px solid #3399ff;
+}
+QPushButton:pressed {
+    background: #3399ff;
+    color: #fff;
+}
+QLabel {
+    color: #222;
+}
+QSplitter::handle {
+    background: #e6e6e6;
+}
+QScrollBar:vertical, QScrollBar:horizontal {
+    border: none;
+    background: #e0e0e0;
+}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: #888;
+    border-radius: 4px;
+}
+QLabel.data-label {
+    color: #000000;
+    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
+}
+#profileList {
+    background: #ffffff;
+    border: 1px solid #bbb;
+    color: #111;
+    font-size: 12px;
+    padding: 2px;
+}
+#profileList::item {
+    padding: 4px 10px;
+    min-height: 22px;
+}
+#profileList::item:selected {
+    background: #aad4ff;
+    color: #000;
+    border: 1px solid #66aaff;
+}
+#profileList::item:!selected {
+    background: #ffffff;
+    color: #444;
+}
 """
 
 class WGGui(QWidget):
@@ -353,6 +431,7 @@ class WGGui(QWidget):
         self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), "wireguard.png")))
         self.setWindowTitle("WireGuard Client")
         self.resize(800, 600)
+        self.quitting = False  # <-- NEW LINE to track if user explicitly quit
 
         # ----- System Tray Setup -----
 
@@ -396,7 +475,7 @@ class WGGui(QWidget):
 
         self.list = QListWidget()
         list_font = QFont()
-        list_font.setPointSize(11)  # Try 9 or 8 for even smaller rows
+        list_font.setPointSize(10)  # Try 9 or 8 for even smaller rows
         self.list.setFont(list_font)
 
         self.list.setSpacing(-1)
@@ -408,7 +487,7 @@ class WGGui(QWidget):
         label_font = QFont()
         label_font.setBold(True)
 
-        self.intf_group = QGroupBox("Interface Details")
+        self.intf_group = QGroupBox("Interface: -")
         intf_form = QFormLayout()
         intf_form.setVerticalSpacing(4)
         intf_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -441,7 +520,7 @@ class WGGui(QWidget):
             intf_form.addRow(name, widget)
         self.intf_group.setLayout(intf_form)
 
-        self.peer_group = QGroupBox("Peer Details")
+        self.peer_group = QGroupBox("Peer:")
         peer_form = QFormLayout()
         peer_form.setVerticalSpacing(4)
         peer_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
@@ -579,20 +658,23 @@ class WGGui(QWidget):
         self.activateWindow()
 
     def quit_and_disconnect(self):
+        self.quitting = True
         if self.is_interface_up():
             self.on_disconnect()
         QApplication.instance().quit()
 
     def closeEvent(self, event):
-        # Hide to tray instead of closing
-        self.hide()
-        self.tray_icon.showMessage(
-            "WireGuard Client",
-            "App is still running in the tray. Right-click for options.",
-            QSystemTrayIcon.MessageIcon.Information,
-            2000
-        )
-        event.ignore()
+        if self.quitting:
+            event.accept()
+        else:
+            self.hide()
+            self.tray_icon.showMessage(
+                "WireGuard Client",
+                "App is still running in the tray. Right-click for options.",
+                QSystemTrayIcon.MessageIcon.Information,
+                5000
+            )
+            event.ignore()
 
     def update_tray_icon(self):
         connected = self.active_profile and self.is_interface_up()
@@ -676,6 +758,7 @@ class WGGui(QWidget):
             item = self.list.currentItem()
             show_profile = item.data(Qt.ItemDataRole.UserRole) if item else None
         self.lbl_status.setText("-")
+        self.intf_group.setTitle(f"Interface: {show_profile}")
         self.lbl_pubkey.setText("-")
         self.lbl_port.setText("-")
         self.lbl_addresses.setText("-")
@@ -776,7 +859,7 @@ if __name__ == "__main__":
     instance_lock = create_instance_lock()
 
     app = QApplication(sys.argv)
-    app.setStyleSheet(APP_STYLESHEET)
+    app.setStyleSheet(APP_STYLESHEET_DARK if is_dark_mode() else APP_STYLESHEET_LIGHT)
     gui = WGGui()
     gui.show()
     sys.exit(app.exec())
