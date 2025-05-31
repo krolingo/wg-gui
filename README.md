@@ -126,14 +126,18 @@
   ```  
   ---
 ## Tray Icon Behavior
-* The app minimizes to the system tray, not the taskbar.
-* Tray icon changes color/state when the connection is active.
-* Left-click the tray icon to toggle visibility of the main window.
-* Right-click the tray icon for quick access:
 
-* 👁 Show
-* 🔌 Disconnect
-* 🚭 Disconnect & Quit
+* The app minimizes to the **system tray**, not the taskbar.
+* The tray icon automatically adjusts for **light or dark mode**, using the appropriate SVGs:
+  
+  <img src="Icons/eye_dark.svg" width="18"/> **Show**  
+  <img src="Icons/plug-off_dark.svg" width="18"/> **Disconnect**  
+  <img src="Icons/logout_dark.svg" width="18"/> **Disconnect & Quit**
+
+* The tray icon changes color/state when the connection is active.
+* **Left-click** toggles visibility of the main window.
+* **Right-click** shows the context menu with the options above.
+
   
 ##  Why This Exists
   
