@@ -156,6 +156,50 @@ Modify APP_STYLESHEET in wg_gui.py for colors, fonts, padding, and behavior
 Toggle visibility, show/hide messages, or even auto-connect on startup
   
   ---
+
+## Automatic Route Handling
+
+To ensure clean connection and disconnection behavior across all WireGuard profiles, the app integrates two global lifecycle scripts:
+
+### `global_postup.sh`
+This script is automatically run **after a profile is connected**, and performs:
+
+- Logging the active interface and timestamp
+- Displaying active routes for the tunnel interface (e.g. `wg0`)
+- Starting a background route monitor to passively observe routing changes
+
+Sample output (visible in GUI log):
+
+```
+[global_postup] ✅ WireGuard up: wg0
+[global_postup] Routing table entries:
+10.7.0.0/24     10.7.0.2     UGS     wg0
+[global_postup] Starting route monitor for wg0...
+[global_postup] Done.
+```
+
+---
+
+### `flush_wg_routes.sh`
+This script runs **automatically on disconnect** and:
+
+- Identifies and removes any active routes associated with `wg0`
+- Ensures the system routing table is clean after tunnel teardown
+
+If no tunnel-specific routes are present, it exits safely:
+
+```
+[flush_wg_routes] No routes found for interface wg0
+```
+
+These scripts:
+
+- Ensure **no stale routes or leaks** are left behind
+- Improve security, reliability, and debug clarity
+- Run silently unless action is needed
+- Require no user configuration or toggling — they're always safe to use
+
+  
   
   ## License
   [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
