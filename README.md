@@ -22,6 +22,7 @@
 * Single-instance locked Prevents multiple copies of the app from running simultaneously.
 * Theme-aware tray icons (light/dark mode) [still missing light styles.]
 * Dark mode detection
+
   ---
   
   ## Filesystem Layout
