@@ -646,25 +646,35 @@ class WGGui(QWidget):
         src = os.path.join(WG_DIR, f"{prof}.conf")
         cmds = []
         if self.is_interface_up():
-            cmds += [["wg-quick","down",SYSTEM_IFACE], ["sleep","1"]]
-        cmds += [["doas","cp",src,SYSTEM_CONF], ["doas","wg-quick","up",SYSTEM_IFACE]]
+            cmds += [["wg-quick", "down", SYSTEM_IFACE], ["sleep", "1"]]
+        cmds += [["doas", "cp", src, SYSTEM_CONF], ["doas", "wg-quick", "up", SYSTEM_IFACE]]
+        cmds.append(["/home/mcapella/scripts/wireguard_client/scripts/global_postup.sh", SYSTEM_IFACE])
         with open(src) as f:
             for ln in f:
                 if ln.startswith("#ping "):
-                    ip = ln.split()[1]
-                    cmds.append(["ping","-c",PING_COUNT,ip])
+                    parts = ln.strip().split()
+                    if len(parts) >= 2:
+                        ip = parts[1]
+                        cmds.append(["ping", "-c", PING_COUNT, ip])
+
         self.commands, self.cmd_index = cmds, 0
         self.log.clear()
         self.run_next()
-        # Tray icon disconnected
         self.update_tray_icon()
 
 
+# Flush routes on disconnect
     def on_disconnect(self):
-        self.commands, self.cmd_index = [["wg-quick","down",SYSTEM_IFACE]], 0
+        self.log.append("🔻 Disconnecting interface and flushing routes...\n")
+        self.commands = [
+            ["wg-quick", "down", SYSTEM_IFACE],
+            ["/home/mcapella/scripts/wireguard_client/scripts/flush_wg_routes.sh", SYSTEM_IFACE]
+        ]
+        self.cmd_index = 0
         self.active_profile = None
         self.log.clear()
         self.run_next()
+
 
     def run_next(self):
         if self.cmd_index < len(self.commands):
