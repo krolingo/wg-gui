@@ -3,6 +3,22 @@ import sys
 import os
 import subprocess
 import time
+import platform
+
+# --- Theme detection for tray icons ---
+def is_dark_mode():
+    if platform.system() == "Darwin":
+        try:
+            mode = subprocess.check_output([
+                "defaults", "read", "-g", "AppleInterfaceStyle"
+            ]).decode().strip()
+            return mode.lower() == "dark"
+        except subprocess.CalledProcessError:
+            return False
+    elif os.environ.get("XDG_CURRENT_DESKTOP", "").lower() in ("gnome", "kde", "xfce"):
+        theme = os.environ.get("GTK_THEME", "").lower()
+        return "dark" in theme
+    return False
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
     QPushButton, QTextEdit, QLabel, QFormLayout, QGroupBox, QSplitter, QSizePolicy,
@@ -10,6 +26,24 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QProcess, Qt, QTimer
 from PyQt6.QtGui import QFont, QIcon, QAction, QTextCursor, QPixmap, QPainter, QColor
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+
+APP_INSTANCE_KEY = "wg_gui_single_instance"
+
+def is_already_running():
+    socket = QLocalSocket()
+    socket.connectToServer(APP_INSTANCE_KEY)
+    running = socket.waitForConnected(100)
+    return running
+
+def create_instance_lock():
+    server = QLocalServer()
+    if not server.listen(APP_INSTANCE_KEY):
+        server.removeServer(APP_INSTANCE_KEY)
+        server.listen(APP_INSTANCE_KEY)
+    return server
+
+
 
 # Configuration
 WG_DIR = os.path.expanduser("~/scripts/wireguard_client/profiles")
@@ -18,6 +52,42 @@ SYSTEM_IFACE = "wg0"
 SYSTEM_CONF = os.path.join(SYSTEM_CONF_DIR, f"{SYSTEM_IFACE}.conf")
 PING_COUNT = "5"
 REFRESH_INTERVAL = 5000  # milliseconds
+
+
+# --- Enhanced Dark Mode Detection ---
+def is_dark_mode():
+    import xml.etree.ElementTree as ET
+    # Manual override
+    env_override = os.environ.get("WG_GUI_FORCE_THEME", "").lower()
+    if env_override in ("dark", "light"):
+        return env_override == "dark"
+
+    if platform.system() == "Darwin":
+        try:
+            mode = subprocess.check_output([
+                "defaults", "read", "-g", "AppleInterfaceStyle"
+            ]).decode().strip()
+            return mode.lower() == "dark"
+        except subprocess.CalledProcessError:
+            return False
+
+    # XFCE on FreeBSD: read ~/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
+    xset_path = os.path.expanduser("~/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml")
+    if os.path.exists(xset_path):
+        try:
+            tree = ET.parse(xset_path)
+            root = tree.getroot()
+            for net_prop in root.findall(".//property[@name='Net']"):
+                for theme_prop in net_prop.findall(".//property[@name='ThemeName']"):
+                    theme_name = theme_prop.attrib.get('value', '').lower()
+                    if "dark" in theme_name or "black" in theme_name:
+                        return True
+        except Exception:
+            pass
+
+    # Fallback: GTK env
+    theme_env = os.environ.get("GTK_THEME", "").lower()
+    return "dark" in theme_env
 
 def time_ago(epoch):
     delta = time.time() - epoch
@@ -301,11 +371,13 @@ class WGGui(QWidget):
         # Update icon based on current status
         self.update_tray_icon()
 
-        # Build the context menu with emoji-prefixed QAction entries
+        # Build the context menu with theme-aware icons
+        theme_suffix = "dark" if is_dark_mode() else "light"
+
         tray_menu = QMenu()
-        act_show = QAction("👁 Show", self)
-        act_disconnect = QAction("🔌 Disconnect", self)
-        act_quit = QAction("🚭 Disconnect & Quit", self)
+        act_show = QAction(QIcon(os.path.join(resource_dir, f"eye_{theme_suffix}.svg")), "Show", self)
+        act_disconnect = QAction(QIcon(os.path.join(resource_dir, f"plug-off_{theme_suffix}.svg")), "Disconnect", self)
+        act_quit = QAction(QIcon(os.path.join(resource_dir, f"logout_{theme_suffix}.svg")), "Disconnect & Quit", self)
 
         tray_menu.addAction(act_show)
         tray_menu.addAction(act_disconnect)
@@ -697,6 +769,12 @@ class WGGui(QWidget):
         return parse_wg_show()
 
 if __name__ == "__main__":
+    if is_already_running():
+        print("🚫 WireGuard Client is already running.")
+        sys.exit(0)
+
+    instance_lock = create_instance_lock()
+
     app = QApplication(sys.argv)
     app.setStyleSheet(APP_STYLESHEET)
     gui = WGGui()
