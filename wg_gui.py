@@ -521,18 +521,36 @@ class WGGui(QWidget):
             2000
         )
         event.ignore()
+
     def update_tray_icon(self):
-        # Show connected icon only when a profile is active and the interface is up
-        if self.active_profile and self.is_interface_up():
-            path = self.icon_connected_path
-            tooltip = "WireGuard (Connected)"
-        else:
-            path = self.icon_disconnected_path
-            tooltip = "WireGuard (Disconnected)"
-        icon = QIcon(path)
-        self.tray_icon.setIcon(icon)
-        self.tray_icon.setToolTip(tooltip)
-    
+        connected = self.active_profile and self.is_interface_up()
+        icon_path = self.icon_connected_path if connected else self.icon_disconnected_path
+        self.tray_icon.setIcon(QIcon(icon_path))
+
+        # Base tooltip
+        tooltip = [f"WireGuard: {'Connected' if connected else 'Disconnected'}"]
+
+        if self.active_profile:
+            tooltip.append(f"Profile: {self.active_profile}")
+
+        if connected:
+            try:
+                _, peer = self.parse_wg_show()
+                endpoint = peer.get("endpoint", "")
+                handshake = peer.get("handshake", "")
+                transfer = peer.get("transfer", "")
+
+                if endpoint:
+                    tooltip.append(f"Endpoint: {endpoint}")
+                if handshake:
+                    tooltip.append(f"Handshake: {handshake}")
+                if transfer:
+                    tooltip.append(f"Transfer: {transfer}")
+            except Exception as e:
+                tooltip.append("⚠ Failed to read status")
+
+        self.tray_icon.setToolTip("\n".join(tooltip))
+
     
     def load_profiles(self):
         self.list.clear()
