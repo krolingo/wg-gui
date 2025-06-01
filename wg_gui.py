@@ -5,8 +5,22 @@ import subprocess
 import time
 import platform
 
+# Configuration
+WG_DIR = os.path.expanduser("~/scripts/wireguard_client/profiles")
+SYSTEM_CONF_DIR = "/usr/local/etc/wireguard"
+SYSTEM_IFACE = "wg0"
+SYSTEM_CONF = os.path.join(SYSTEM_CONF_DIR, f"{SYSTEM_IFACE}.conf")
+PING_COUNT = "5"
+REFRESH_INTERVAL = 5000  # milliseconds
+APP_INSTANCE_KEY = "wg_gui_single_instance"
+
+
 # --- Theme detection for tray icons ---
 def is_dark_mode():
+    # Manual override via environment variable
+    env_override = os.environ.get("WG_GUI_FORCE_THEME", "").lower()
+    if env_override in ("dark", "light"):
+        return env_override == "dark"
     if platform.system() == "Darwin":
         try:
             mode = subprocess.check_output([
@@ -15,9 +29,26 @@ def is_dark_mode():
             return mode.lower() == "dark"
         except subprocess.CalledProcessError:
             return False
-    elif os.environ.get("XDG_CURRENT_DESKTOP", "").lower() in ("gnome", "kde", "xfce"):
+    xdg_desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    if xdg_desktop in ("gnome", "kde", "xfce"):
         theme = os.environ.get("GTK_THEME", "").lower()
-        return "dark" in theme
+        if "dark" in theme:
+            return True
+        # XFCE-specific detection: parse xsettings.xml for ThemeName
+        if xdg_desktop == "xfce":
+            try:
+                import xml.etree.ElementTree as ET
+                xsettings_path = os.path.expanduser("~/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml")
+                if os.path.exists(xsettings_path):
+                    tree = ET.parse(xsettings_path)
+                    root = tree.getroot()
+                    for prop in root.findall(".//property"):
+                        if prop.attrib.get("name") == "ThemeName":
+                            value = prop.attrib.get("value", "").lower()
+                            if "dark" in value or "black" in value:
+                                return True
+            except Exception:
+                pass
     return False
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
@@ -27,8 +58,6 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QProcess, Qt, QTimer
 from PyQt6.QtGui import QFont, QIcon, QAction, QTextCursor, QPixmap, QPainter, QColor
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-
-APP_INSTANCE_KEY = "wg_gui_single_instance"
 
 def is_already_running():
     socket = QLocalSocket()
@@ -43,51 +72,6 @@ def create_instance_lock():
         server.listen(APP_INSTANCE_KEY)
     return server
 
-
-
-# Configuration
-WG_DIR = os.path.expanduser("~/scripts/wireguard_client/profiles")
-SYSTEM_CONF_DIR = "/usr/local/etc/wireguard"
-SYSTEM_IFACE = "wg0"
-SYSTEM_CONF = os.path.join(SYSTEM_CONF_DIR, f"{SYSTEM_IFACE}.conf")
-PING_COUNT = "5"
-REFRESH_INTERVAL = 5000  # milliseconds
-
-
-# --- Enhanced Dark Mode Detection ---
-def is_dark_mode():
-    import xml.etree.ElementTree as ET
-    # Manual override
-    env_override = os.environ.get("WG_GUI_FORCE_THEME", "").lower()
-    if env_override in ("dark", "light"):
-        return env_override == "dark"
-
-    if platform.system() == "Darwin":
-        try:
-            mode = subprocess.check_output([
-                "defaults", "read", "-g", "AppleInterfaceStyle"
-            ]).decode().strip()
-            return mode.lower() == "dark"
-        except subprocess.CalledProcessError:
-            return False
-
-    # XFCE on FreeBSD: read ~/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml
-    xset_path = os.path.expanduser("~/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml")
-    if os.path.exists(xset_path):
-        try:
-            tree = ET.parse(xset_path)
-            root = tree.getroot()
-            for net_prop in root.findall(".//property[@name='Net']"):
-                for theme_prop in net_prop.findall(".//property[@name='ThemeName']"):
-                    theme_name = theme_prop.attrib.get('value', '').lower()
-                    if "dark" in theme_name or "black" in theme_name:
-                        return True
-        except Exception:
-            pass
-
-    # Fallback: GTK env
-    theme_env = os.environ.get("GTK_THEME", "").lower()
-    return "dark" in theme_env
 
 def time_ago(epoch):
     delta = time.time() - epoch
@@ -165,229 +149,14 @@ def parse_wg_conf(profile_path):
                     interface['port'] = v
     return interface, peer
 
-APP_STYLESHEET_DARK = """
-QWidget {
-    background: #232427;
-    color: #ddd;
-    font-family: "IBM Plex Sans Medium","JetBrains Mono", monospace;
-    text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
-}
-QGroupBox {
-    border: 1px solid #444;
-    border-radius: 6px;
-    background: #232427;
-    font-weight: bold;
-    margin-top: 20px;       /* previously 12px */
-    padding-top: 4px;       /* previously 8px */
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 4px 0 4px;
-    background: transparent;
-    color: #a7e2ff;
-}
-QListWidget, QTextEdit {
-    background: #28292c;
-    border: 1px solid #333;
-    color: #e6e6e6;
-}
-QListWidget::item {
-    padding: 0 0px;
-    min-height: 7px;
-}
-QListWidget::item:selected {
-    background: #384452;
-    color: #fff;
-    border: .2px solid #60b8ff;
-}
-QListWidget::item:!selected {
-    background: #28292c;
-    color: #b7b7b7;
-}
-QPushButton {
-    background: #212832;
-    color: #e2e2e2;
-    border: 1px solid #444;
-    padding: 5px 18px;
-    border-radius: 5px;
-    font-weight: bold;
-}
-QPushButton:hover {
-    background: #3c526b;
-    color: #fff;
-    border: 1px solid #60b8ff;
-}
-QPushButton:pressed {
-    background: #60b8ff;
-    color: #232427;
-}
-QLabel {
-    color: #e0e0e0;
-}
-QSplitter::handle {
-    background: #23272a;
-}
-QScrollBar:vertical {
-    border: none;
-    background: #232427;
-    width: 8px;
-    margin: 2px 0;
-}
-QScrollBar::handle:vertical {
-    background: #4f6377;
-    min-height: 20px;
-    border-radius: 4px;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-    height: 0px;
-    background: none;
-    border: none;
-}
-QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-    background: none;
-}
-QScrollBar:horizontal {
-    border: none;
-    background: #232427;
-    height: 8px;
-    margin: 0 2px;
-}
-QScrollBar::handle:horizontal {
-    background: #4f6377;
-    min-width: 20px;
-    border-radius: 4px;
-}
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-    width: 0px;
-    background: none;
-    border: none;
-}
-QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-    background: none;
-}
-QLabel.data-label {
-    color: #ffffff;
-    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
-    text-shadow: 2px 2px 2px rgba(0, 0, 0, 0);
-}
-#profileList {
-    background: #1c1e22;
-    border: 1px solid #444;
-    color: #d8d8d8;
-    font-size: 12px;
-    padding: 2px;
-}
-#profileList::item {
-    padding: 4px 10px;
-    min-height: 22px;
-}
-#profileList::item:selected {
-    background: #375a7f;
-    color: #ffffff;
-    border: 1px solid #60b8ff;
-}
-#profileList::item:!selected {
-    background: #1c1e22;
-    color: #b0b0b0;
-}
-"""
+#APP_STYLESHEET = """
+#QLabel.data-label {
+#    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
+#    text-shadow: 2px 2px 2px rgba(0, 0, 0, 0);
 
-APP_STYLESHEET_LIGHT = """
-QWidget {
-    background: #f4f4f4;
-    color: #111;
-    font-family: "IBM Plex Sans", "JetBrains Mono", monospace;
-}
-QGroupBox {
-    border: 1px solid #aaa;
-    border-radius: 6px;
-    background: #ffffff;
-    font-weight: bold;
-    margin-top: 20px;       /* previously 12px */
-    padding-top: 4px;       /* previously 8px */
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 4px;
-    background: transparent;
-    color: #0050aa;
-}
-QListWidget, QTextEdit {
-    background: #ffffff;
-    border: 1px solid #ccc;
-    color: #111;
-}
-QListWidget::item {
-    padding: 0 0px;
-    min-height: 7px;
-}
-QListWidget::item:selected {
-    background: #cce0ff;
-    color: #000;
-    border: 1px solid #3399ff;
-}
-QListWidget::item:!selected {
-    background: #ffffff;
-    color: #444;
-}
-QPushButton {
-    background: #e0e0e0;
-    color: #000;
-    border: 1px solid #999;
-    padding: 5px 18px;
-    border-radius: 5px;
-    font-weight: bold;
-}
-QPushButton:hover {
-    background: #cce0ff;
-    color: #000;
-    border: 1px solid #3399ff;
-}
-QPushButton:pressed {
-    background: #3399ff;
-    color: #fff;
-}
-QLabel {
-    color: #222;
-}
-QSplitter::handle {
-    background: #e6e6e6;
-}
-QScrollBar:vertical, QScrollBar:horizontal {
-    border: none;
-    background: #e0e0e0;
-}
-QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
-    background: #888;
-    border-radius: 4px;
-}
-QLabel.data-label {
-    color: #000000;
-    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
-}
-#profileList {
-    background: #ffffff;
-    border: 1px solid #bbb;
-    color: #111;
-    font-size: 12px;
-    padding: 2px;
-}
-#profileList::item {
-    padding: 4px 10px;
-    min-height: 22px;
-}
-#profileList::item:selected {
-    background: #aad4ff;
-    color: #000;
-    border: 1px solid #66aaff;
-}
-#profileList::item:!selected {
-    background: #ffffff;
-    color: #444;
-}
-"""
+#}
+
+#"""
 
 class WGGui(QWidget):
     def __init__(self):
@@ -423,8 +192,9 @@ class WGGui(QWidget):
         print("USING ICON DIR:", resource_dir)
         print("ICON FILES:", os.listdir(resource_dir))
 
-        self.icon_disconnected_path = os.path.join(resource_dir, "wireguard_off.png")
-        self.icon_connected_path = os.path.join(resource_dir, "wg_connected.png")
+        self.resource_dir = resource_dir
+        self.icon_disconnected_path = os.path.join(self.resource_dir, "wireguard_off.png")
+        self.icon_connected_path = os.path.join(self.resource_dir, "wg_connected.png")
 
         # Initialize active_profile early so update_tray_icon never errors
         self.active_profile = None
@@ -435,9 +205,6 @@ class WGGui(QWidget):
 
         # ----- System Tray Setup -----
 
-        # Set icon paths for connected/disconnected states
-        self.icon_disconnected_path = os.path.join(resource_dir, "wireguard_off.png")
-        self.icon_connected_path = os.path.join(resource_dir, "wg_connected.png")
         # Debug print for icon path existence
         print("DEBUG: Loading tray icon from", self.icon_disconnected_path, "exists:", os.path.exists(self.icon_disconnected_path), file=sys.stderr)
         # Initialize tray icon with the disconnected icon
@@ -454,26 +221,26 @@ class WGGui(QWidget):
         theme_suffix = "dark" if is_dark_mode() else "light"
 
         tray_menu = QMenu()
-        act_show = QAction(QIcon(os.path.join(resource_dir, f"eye_{theme_suffix}.svg")), "Show", self)
-        act_disconnect = QAction(QIcon(os.path.join(resource_dir, f"plug-off_{theme_suffix}.svg")), "Disconnect", self)
-        act_quit = QAction(QIcon(os.path.join(resource_dir, f"logout_{theme_suffix}.svg")), "Disconnect & Quit", self)
+        self.act_show = QAction(QIcon(os.path.join(self.resource_dir, f"eye_{theme_suffix}.svg")), "Show", self)
+        self.act_disconnect = QAction(QIcon(os.path.join(self.resource_dir, f"plug-off_{theme_suffix}.svg")), "Disconnect", self)
+        self.act_quit = QAction(QIcon(os.path.join(self.resource_dir, f"logout_{theme_suffix}.svg")), "Disconnect & Quit", self)
 
-        tray_menu.addAction(act_show)
-        tray_menu.addAction(act_disconnect)
+        tray_menu.addAction(self.act_show)
+        tray_menu.addAction(self.act_disconnect)
         tray_menu.addSeparator()
-        tray_menu.addAction(act_quit)
+        tray_menu.addAction(self.act_quit)
 
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.on_tray_activated)
 
         # Connect actions to methods
-        act_show.triggered.connect(self.show_and_raise)
-        act_disconnect.triggered.connect(self.on_disconnect)
-        act_quit.triggered.connect(self.quit_and_disconnect)
-
-        self.tray_icon.show()
+        self.act_show.triggered.connect(self.show_and_raise)
+        self.act_disconnect.triggered.connect(self.on_disconnect)
+        self.act_quit.triggered.connect(self.quit_and_disconnect)
 
         self.list = QListWidget()
+        self.list.setMinimumHeight(260)
+        self.list.setMaximumHeight(400)
         list_font = QFont()
         list_font.setPointSize(10)  # Try 9 or 8 for even smaller rows
         self.list.setFont(list_font)
@@ -484,24 +251,39 @@ class WGGui(QWidget):
         self.list.setMaximumWidth(300)
         self.list.currentItemChanged.connect(self.update_detail_panel)
 
+        # Define label_font early for reuse
         label_font = QFont()
-        label_font.setBold(True)
 
         self.intf_group = QGroupBox("Interface: -")
+        intf_title_font = QFont()
+        intf_title_font.setBold(True)
+        intf_title_font.setPointSize(11)
+        self.intf_group.setFont(intf_title_font)
+        
         intf_form = QFormLayout()
-        intf_form.setVerticalSpacing(4)
+        intf_form.setVerticalSpacing(12)
         intf_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         intf_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        intf_form.setHorizontalSpacing(24)
-        intf_form.setVerticalSpacing(7)
-        self.lbl_status = QLabel()
+        intf_form.setHorizontalSpacing(16)
+        # Status: dot + text
+        self.status_dot = QLabel()
+        self.status_text = QLabel()
+        status_layout = QHBoxLayout()
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_layout.setSpacing(6)
+        status_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        status_layout.addWidget(self.status_dot)
+        status_layout.addWidget(self.status_text)
+        status_layout.setSpacing(4)
+        status_layout.setContentsMargins(0, 0, 0, 0)
+        status_container = QWidget()
+        status_container.setLayout(status_layout)
         self.lbl_pubkey = QLabel()
         self.lbl_port = QLabel()
         self.lbl_addresses = QLabel()
         self.lbl_dns = QLabel()
 
-        for lbl in (self.lbl_status, self.lbl_pubkey, self.lbl_port,
-                    
+        for lbl in (self.status_dot, self.status_text, self.lbl_pubkey, self.lbl_port,
                     self.lbl_addresses, self.lbl_dns):
             lbl.setFont(label_font)
             lbl.setProperty("class", "data-label")
@@ -511,7 +293,7 @@ class WGGui(QWidget):
             lbl.setMinimumHeight(16)
 
         for name, widget in [
-            ("Status:", self.lbl_status),
+            ("Status:", status_container),
             ("Public Key:", self.lbl_pubkey),
             ("Listen Port:", self.lbl_port),
             ("Addresses:", self.lbl_addresses),
@@ -521,12 +303,16 @@ class WGGui(QWidget):
         self.intf_group.setLayout(intf_form)
 
         self.peer_group = QGroupBox("Peer:")
+        peer_title_font = QFont()
+        peer_title_font.setBold(True)
+        peer_title_font.setPointSize(11)
+        self.peer_group.setFont(peer_title_font)
         peer_form = QFormLayout()
-        peer_form.setVerticalSpacing(4)
+        peer_form.setHorizontalSpacing(16)  # tighter horizontal gap between label and value
+        peer_form.setVerticalSpacing(12)    # match interface section vertical spacing
         peer_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         peer_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        peer_form.setHorizontalSpacing(24)
-        peer_form.setVerticalSpacing(7)
+
         self.lbl_peer_key = QLabel()
         self.lbl_allowed_ips = QLabel()
         self.lbl_endpoint = QLabel()
@@ -537,13 +323,10 @@ class WGGui(QWidget):
                     self.lbl_endpoint, self.lbl_handshake, self.lbl_transfer):
             lbl.setFont(label_font)
             lbl.setProperty("class", "data-label")
-            lbl.setWordWrap(True)
-            lbl.setMinimumWidth(460)
-            lbl.setMaximumWidth(10000)
+            lbl.setWordWrap(False)
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
-            lbl.setMaximumHeight(1000)
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            lbl.setMinimumHeight(22)
+            lbl.setMinimumHeight(16)
 
         for name, widget in [
             ("Public Key:", self.lbl_peer_key),
@@ -570,8 +353,10 @@ class WGGui(QWidget):
         left.setMaximumWidth(300)
         left_layout = QVBoxLayout(left)
         profiles_label = QLabel("Profiles")
+
+        profiles_label.setProperty("class", "section-title")
+
         profiles_font = QFont()
-        profiles_font.setBold(True)
         profiles_label.setFont(profiles_font)
         left_layout.addWidget(profiles_label)
         left_layout.addWidget(self.list)
@@ -584,24 +369,32 @@ class WGGui(QWidget):
         right_layout.addWidget(self.peer_group)
         right_layout.addStretch()
         def match_groupbox_widths():
-            intf_width = self.intf_group.sizeHint().width()
-            peer_width = self.peer_group.sizeHint().width()
-            widest = max(intf_width, peer_width, 520)
-            self.intf_group.setMinimumWidth(widest)
-            self.peer_group.setMinimumWidth(widest)
             intf_form: QFormLayout = self.intf_group.layout()
             peer_form: QFormLayout = self.peer_group.layout()
-            label_w = max(
-                intf_form.labelForField(self.lbl_status).sizeHint().width(),
-                peer_form.labelForField(self.lbl_peer_key).sizeHint().width(),
-                110
-            )
-            for form in [intf_form, peer_form]:
+            all_forms = [intf_form, peer_form]
+
+            # Collect label widgets
+            label_widgets = []
+            for form in all_forms:
                 for i in range(form.rowCount()):
-                    label = form.itemAt(i, QFormLayout.ItemRole.LabelRole).widget()
-                    if label:
-                        label.setMinimumWidth(label_w)
-                        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    item = form.itemAt(i, QFormLayout.ItemRole.LabelRole)
+                    if item:
+                        label_widgets.append(item.widget())
+
+            # Determine the widest label
+            label_w = max((label.sizeHint().width() for label in label_widgets if label), default=110)
+
+            # Apply width to all labels
+            for label in label_widgets:
+                if label:
+                    label.setMinimumWidth(label_w)
+                    label.setMaximumWidth(label_w)
+                    label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+            # Optional: ensure groupboxes align
+            widest = max(self.intf_group.sizeHint().width(), self.peer_group.sizeHint().width(), 520)
+            self.intf_group.setMinimumWidth(widest)
+            self.peer_group.setMinimumWidth(widest)
         match_groupbox_widths()
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -619,8 +412,10 @@ class WGGui(QWidget):
         main_layout = QVBoxLayout(self)
         main_layout.addWidget(splitter)
         logs_label = QLabel("Logs")
+
+        logs_label.setProperty("class", "section-title")
+
         logs_font = QFont()
-        logs_font.setBold(True)
         logs_label.setFont(logs_font)
         main_layout.addWidget(logs_label)
         main_layout.addWidget(self.log)
@@ -725,22 +520,40 @@ class WGGui(QWidget):
             prof = itm.data(Qt.ItemDataRole.UserRole)
             font = QFont()
             font.setBold(up and prof == self.active_profile)
-            # Draw a small circle as icon (mac-style)
+            
+            # Draw a clean circle with fully transparent background
             size = 10
             pixmap = QPixmap(size, size)
             pixmap.fill(Qt.GlobalColor.transparent)
+
             painter = QPainter(pixmap)
-            color = QColor('#60FF60') if (up and prof == self.active_profile) else QColor('#FFFFFF')
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(Qt.PenStyle.NoPen)
+
+            # use a soft gray when not active, green when active
+            color = QColor('#60FF60') if (up and prof == self.active_profile) else QColor('#888888')
             painter.setBrush(color)
-            painter.setPen(Qt.GlobalColor.transparent)
-            painter.drawEllipse(0, 0, size, size)
+
+            # Inset a bit to prevent edge artifacts
+            painter.drawEllipse(1, 1, size - 2, size - 2)
             painter.end()
             itm.setIcon(QIcon(pixmap))
+
             itm.setFont(font)
             itm.setText(prof)
         self.update_detail_panel()
         # Tray icon connected
         self.update_tray_icon()
+        # Update tray menu icons for theme
+        self.update_tray_menu_icons()
+
+
+    def update_tray_menu_icons(self):
+        """Update tray menu icons based on current theme."""
+        theme_suffix = "dark" if is_dark_mode() else "light"
+        self.act_show.setIcon(QIcon(os.path.join(self.resource_dir, f"eye_{theme_suffix}.svg")))
+        self.act_disconnect.setIcon(QIcon(os.path.join(self.resource_dir, f"plug-off_{theme_suffix}.svg")))
+        self.act_quit.setIcon(QIcon(os.path.join(self.resource_dir, f"logout_{theme_suffix}.svg")))
 
 
     def is_interface_up(self):
@@ -757,7 +570,8 @@ class WGGui(QWidget):
         if not show_profile:
             item = self.list.currentItem()
             show_profile = item.data(Qt.ItemDataRole.UserRole) if item else None
-        self.lbl_status.setText("-")
+        self.status_dot.clear()
+        self.status_text.clear()
         self.intf_group.setTitle(f"Interface: {show_profile}")
         self.lbl_pubkey.setText("-")
         self.lbl_port.setText("-")
@@ -783,13 +597,42 @@ class WGGui(QWidget):
             self.lbl_port.setText(conf_port)
         if self.is_interface_up() and show_profile == self.active_profile:
             iface, peer = self.parse_wg_show()
-            self.lbl_status.setText("Up")
+            # Add green circle next to "Up"
+            pix = QPixmap(12, 12)
+            pix.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setBrush(QColor('#60FF60'))
+            p.setPen(Qt.GlobalColor.transparent)
+            p.drawEllipse(0, 0, 12, 12)
+            p.end()
+            self.status_dot.setPixmap(pix)
+            self.status_text.setText("Up")
+            self.status_text.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+            self.status_dot.setFixedSize(12, 12)
             self.lbl_pubkey.setText(iface.get('pubkey', "-"))
             self.lbl_port.setText(iface.get('port') or conf_port or "-")
             self.lbl_handshake.setText(peer.get('handshake', "-"))
             self.lbl_transfer.setText(peer.get('transfer', "-"))
         else:
-            self.lbl_status.setText("Down")
+            # Always set dot to a fixed 12x12 transparent pixmap with red fill
+            pix = QPixmap(12, 12)
+            pix.fill(Qt.GlobalColor.transparent)
+            p = QPainter(pix)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setBrush(QColor('#FF5050') if self.active_profile else QColor('#AAAAAA'))
+            p.setPen(Qt.GlobalColor.transparent)
+            p.drawEllipse(0, 0, 12, 12)
+            p.end()
+            self.status_dot.setPixmap(pix)
+            self.status_dot.setFixedSize(12, 12)
+
+            # Set status text
+            self.status_text.setText("Down" if self.active_profile else "")
+            self.status_text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.status_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+
+
 
     def on_connect(self):
         itm = self.list.currentItem()
@@ -803,7 +646,9 @@ class WGGui(QWidget):
         if self.is_interface_up():
             cmds += [["wg-quick", "down", SYSTEM_IFACE], ["sleep", "1"]]
         cmds += [["doas", "cp", src, SYSTEM_CONF], ["doas", "wg-quick", "up", SYSTEM_IFACE]]
-        cmds.append(["/home/mcapella/scripts/wireguard_client/scripts/global_postup.sh", SYSTEM_IFACE])
+        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+        POSTUP_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "global_postup.sh")
+        cmds.append([POSTUP_SCRIPT, SYSTEM_IFACE])
         with open(src) as f:
             for ln in f:
                 if ln.startswith("#ping "):
@@ -818,12 +663,14 @@ class WGGui(QWidget):
         self.update_tray_icon()
 
 
-# Flush routes on disconnect
+    # Flush routes on disconnect
     def on_disconnect(self):
         self.log.append("🔻 Disconnecting interface and flushing routes...\n")
+        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+        FLUSH_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "flush_wg_routes.sh")
         self.commands = [
             ["wg-quick", "down", SYSTEM_IFACE],
-            ["/home/mcapella/scripts/wireguard_client/scripts/flush_wg_routes.sh", SYSTEM_IFACE]
+            [FLUSH_SCRIPT, SYSTEM_IFACE]
         ]
         self.cmd_index = 0
         self.active_profile = None
@@ -859,7 +706,8 @@ if __name__ == "__main__":
     instance_lock = create_instance_lock()
 
     app = QApplication(sys.argv)
-    app.setStyleSheet(APP_STYLESHEET_DARK if is_dark_mode() else APP_STYLESHEET_LIGHT)
+ #   app.setStyleSheet(APP_STYLESHEET)  # <-- Apply styles
     gui = WGGui()
     gui.show()
     sys.exit(app.exec())
+ 
