@@ -11,7 +11,7 @@
 * System tray icon with connection status (disconnected / connected)
 * Toggle visibility by clicking the tray icon
 * Tray icon persists even when the window is closed
-* Clean, responsive interface using Qt Stylesheets (QSS)
+* ~~Clean, responsive interface using Qt Stylesheets (QSS)~~
 * Auto-refreshing interface and peer status
 * Selectable text in all details and logs
 * Compact, monospaced layout for easy reading
