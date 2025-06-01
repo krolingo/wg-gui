@@ -149,15 +149,6 @@ def parse_wg_conf(profile_path):
                     interface['port'] = v
     return interface, peer
 
-#APP_STYLESHEET = """
-#QLabel.data-label {
-#    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
-#    text-shadow: 2px 2px 2px rgba(0, 0, 0, 0);
-
-#}
-
-#"""
-
 class WGGui(QWidget):
     def __init__(self):
         super().__init__()
@@ -706,7 +697,6 @@ if __name__ == "__main__":
     instance_lock = create_instance_lock()
 
     app = QApplication(sys.argv)
- #   app.setStyleSheet(APP_STYLESHEET)  # <-- Apply styles
     gui = WGGui()
     gui.show()
     sys.exit(app.exec())
