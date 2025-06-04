@@ -5,18 +5,39 @@ import subprocess
 import time
 import platform
 import shutil
+import zipfile
+import xml.etree.ElementTree as ET
 
-# Configuration
+# PyQt6 imports
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
+    QPushButton, QTextEdit, QLabel, QFormLayout, QGroupBox, QSplitter, QSizePolicy,
+    QMessageBox, QSystemTrayIcon, QMenu, QFileDialog, QInputDialog, QDialog,
+    QDialogButtonBox, QPlainTextEdit, QStyle, QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect
+)
+from PyQt6.QtCore import (
+    QProcess, Qt, QTimer, QRegularExpression, QPropertyAnimation
+)
+from PyQt6.QtGui import (
+    QFont, QIcon, QAction, QTextCursor, QPixmap, QPainter, QColor,
+    QSyntaxHighlighter, QTextCharFormat
+)
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
+
+# --- Configuration ---
 WG_DIR = os.path.expanduser("~/scripts/wireguard_client/profiles")
 SYSTEM_CONF_DIR = "/usr/local/etc/wireguard"
-SYSTEM_IFACE = "wg0"
+if platform.system() == "Darwin":
+    SYSTEM_IFACE = "utun4"
+else:
+    SYSTEM_IFACE = "wg0"
 SYSTEM_CONF = os.path.join(SYSTEM_CONF_DIR, f"{SYSTEM_IFACE}.conf")
 PING_COUNT = "5"
 REFRESH_INTERVAL = 5000  # milliseconds
-
-# Platform-aware binary selection
 APP_INSTANCE_KEY = "wg_gui_single_instance"
 
+# --- Platform Configuration ---
 if platform.system() == "Darwin":
     BASH = shutil.which("bash") or "/opt/homebrew/bin/bash"
     if not BASH.endswith("/bash") or "brew" not in BASH:
@@ -24,10 +45,31 @@ if platform.system() == "Darwin":
     WG_QUICK = "/opt/homebrew/bin/wg-quick"
 else:
     BASH = "bash"
+    import os
+import platform
+import shutil
+
+# Platform-aware binary selection
+if platform.system() == "Darwin":
+    BASH = shutil.which("bash") or "/opt/homebrew/bin/bash"
+    if not BASH.endswith("/bash") or "brew" not in BASH:
+        BASH = "/opt/homebrew/bin/bash"
+    WG_QUICK = "/opt/homebrew/bin/wg-quick"
+    os.environ["PATH"] = "/opt/homebrew/bin:" + os.environ["PATH"]
+else:
+    BASH = "bash"
     WG_QUICK = "/usr/local/bin/wg-quick"
-# --- Theme detection for tray icons ---
+
+# --- Stylesheet ---
+APP_STYLESHEET = """
+QLabel.data-label {
+    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
+    /* text-shadow: 2px 2px 2px rgba(0, 0, 0, 0); */
+}
+"""
+
+# --- Utility Functions ---
 def is_dark_mode():
-    # Manual override via environment variable
     env_override = os.environ.get("WG_GUI_FORCE_THEME", "").lower()
     if env_override in ("dark", "light"):
         return env_override == "dark"
@@ -44,11 +86,8 @@ def is_dark_mode():
         theme = os.environ.get("GTK_THEME", "").lower()
         if "dark" in theme:
             return True
-
-# XFCE-specific detection: parse xsettings.xml for ThemeName
         if xdg_desktop == "xfce":
             try:
-                import xml.etree.ElementTree as ET
                 xsettings_path = os.path.expanduser("~/.config/xfce4/xfconf/xfce-perchannel-xml/xsettings.xml")
                 if os.path.exists(xsettings_path):
                     tree = ET.parse(xsettings_path)
@@ -61,18 +100,6 @@ def is_dark_mode():
             except Exception:
                 pass
     return False
-from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPushButton, QTextEdit, QLabel, QFormLayout, QGroupBox, QSplitter, QSizePolicy,
-    QMessageBox, QSystemTrayIcon, QMenu
-)
-from PyQt6.QtCore import QProcess, Qt, QTimer
-from PyQt6.QtGui import QFont, QIcon, QAction, QTextCursor, QPixmap, QPainter, QColor
-from PyQt6.QtNetwork import QLocalServer, QLocalSocket
-
-# Additional imports for syntax highlighting
-from PyQt6.QtGui import QSyntaxHighlighter, QTextCharFormat, QColor
-from PyQt6.QtCore import QRegularExpression
 
 def is_already_running():
     socket = QLocalSocket()
@@ -102,7 +129,7 @@ def parse_wg_show():
     iface_info, peer_info = {}, {}
     try:
         out = subprocess.check_output(
-            ["wg", "show", SYSTEM_IFACE],
+            ["doas","wg", "show", SYSTEM_IFACE],
         ).decode().strip()
         lines = out.splitlines()
         for line in lines:
@@ -163,18 +190,40 @@ def parse_wg_conf(profile_path):
                     interface['port'] = v
     return interface, peer
 
-APP_STYLESHEET = """
-QLabel.data-label {
-    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
-    text-shadow: 2px 2px 2px rgba(0, 0, 0, 0);
+class WireGuardHighlighter(QSyntaxHighlighter):
+    def __init__(self, document):
+        super().__init__(document)
+        self.rules = []
 
-}
+        section_format = QTextCharFormat()
+        section_format.setForeground(QColor("#87CEFA"))  # Light blue
+        section_format.setFontWeight(QFont.Weight.Bold)
+        self.rules.append((QRegularExpression(r"^\s*\[.*\]\s*$"), section_format))
 
-"""
+        key_format = QTextCharFormat()
+        key_format.setForeground(QColor("#90EE90"))  # Light green
+        self.rules.append((QRegularExpression(r"^\s*\w+\s*="), key_format))
+
+        comment_format = QTextCharFormat()
+        if is_dark_mode():
+            comment_format.setForeground(QColor("#BBBBBB"))
+        else:
+            comment_format.setForeground(QColor("#888888"))
+        comment_format.setFontItalic(True)
+        self.rules.append((QRegularExpression(r"#.*$"), comment_format))
+
+    def highlightBlock(self, text):
+        for pattern, fmt in self.rules:
+            match_iter = pattern.globalMatch(text)
+            while match_iter.hasNext():
+                match = match_iter.next()
+                self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
+
 
 class WGGui(QWidget):
     def __init__(self):
         super().__init__()
+        self.interface_up = False
 
 # --- Robust icon resource location ---
         icon_names = ["wireguard_off.png", "wg_connected.png"]
@@ -269,7 +318,7 @@ class WGGui(QWidget):
         list_font = QFont()
 
 # List font size        
-        list_font.setPointSize(10)  # Try 9 or 8 for even smaller rows
+        list_font.setPointSize(12)  # Try 9 or 8 for even smaller rows
         list_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         self.list.setFont(list_font)
 
@@ -279,13 +328,21 @@ class WGGui(QWidget):
         self.list.setMaximumWidth(300)
         self.list.currentItemChanged.connect(self.update_detail_panel)
 
+        # Remove any custom visual effects/styles on list items (shadows, borders, gradients)
+        # If you had set a stylesheet for QListWidget::item or similar, it should be removed.
+        # self.list.setStyleSheet("")  # Uncomment if you had previously set item styles
+
         label_font = QFont()
         label_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+        
+        left_label_font = QFont()
+        left_label_font.setBold(True)
+        left_label_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+
 
         self.intf_group = QGroupBox("Interface: -")
         intf_title_font = QFont()
         intf_title_font.setBold(True)
-        intf_title_font.setPointSize(11)
         intf_title_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         self.intf_group.setFont(intf_title_font)
         self.intf_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
@@ -334,7 +391,9 @@ class WGGui(QWidget):
             ("Addresses:", self.lbl_addresses),
             ("DNS Servers:", self.lbl_dns)
         ]:
+# Interface labels  
             label = QLabel(name)
+            label.setFont(left_label_font) 
             label.setMinimumWidth(130)
             label.setMaximumWidth(130)
             label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
@@ -374,7 +433,6 @@ class WGGui(QWidget):
         """)
 
 # Apply drop shadow to the toggle button (pillbox and text)
-        from PyQt6.QtWidgets import QGraphicsDropShadowEffect
 
         toggle_shadow = QGraphicsDropShadowEffect()
         toggle_shadow.setBlurRadius(8)
@@ -399,7 +457,6 @@ class WGGui(QWidget):
         self.peer_group = QGroupBox("Peer:")
         peer_title_font = QFont()
         peer_title_font.setBold(True)
-        peer_title_font.setPointSize(11)
         peer_title_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         self.peer_group.setFont(peer_title_font)
         self.peer_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
@@ -434,7 +491,10 @@ class WGGui(QWidget):
             ("Last Handshake:", self.lbl_handshake),
             ("Transfer:", self.lbl_transfer)
         ]:
+
+# Peer labels        
             label = QLabel(name)
+            label.setFont(left_label_font)
             label.setMinimumWidth(130)
             label.setMaximumWidth(130)
             label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
@@ -473,10 +533,12 @@ class WGGui(QWidget):
         left.setMaximumWidth(300)
         left_layout = QVBoxLayout(left)
         profiles_label = QLabel("Profiles")
-
         profiles_label.setProperty("class", "section-title")
 
+
+# "Profiles" header label
         profiles_font = QFont()
+        profiles_font.setBold(True)
         profiles_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         profiles_label.setFont(profiles_font)
 
@@ -485,8 +547,6 @@ class WGGui(QWidget):
         profiles_header_layout = QHBoxLayout()
         profiles_header_layout.addWidget(profiles_label)
         profiles_header_layout.addStretch()
-
-        from PyQt6.QtWidgets import QStyle
 
  # --- Profile Management Buttons ---
 
@@ -528,14 +588,13 @@ class WGGui(QWidget):
         right.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         right_layout = QVBoxLayout(right)
         right_layout.setSpacing(12)
-        right_layout.setContentsMargins(10, 12, 0, 0)
+        right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.addWidget(self.intf_group)
         right_layout.addWidget(self.peer_group)
         right_layout.addStretch()
         def match_groupbox_widths():
             intf_form = self.intf_form_layout
             peer_form = self.peer_form_layout
-
             all_forms = [intf_form, peer_form]
 
 # Collect label widgets
@@ -587,11 +646,14 @@ class WGGui(QWidget):
 
         logs_label.setProperty("class", "section-title")
 
+# Log font
         logs_font = QFont()
+        logs_font.setBold(True)
         logs_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         logs_label.setFont(logs_font)
         main_layout.addWidget(logs_label)
         main_layout.addWidget(self.log)
+        
 
 # self.btnConnect.clicked.connect(self.on_connect)
 # self.btnDisconnect.clicked.connect(self.on_disconnect)
@@ -612,20 +674,6 @@ class WGGui(QWidget):
 
         self.load_profiles()
         QTimer.singleShot(100, self.refresh_status)
-
-# Fade-in effect for the profile list
-        from PyQt6.QtWidgets import QGraphicsOpacityEffect
-        from PyQt6.QtCore import QPropertyAnimation
-
-        self.list_opacity_effect = QGraphicsOpacityEffect(self.list)
-        self.list.setGraphicsEffect(self.list_opacity_effect)
-        self.list_opacity_effect.setOpacity(0.0)
-
-        self.fade_anim = QPropertyAnimation(self.list_opacity_effect, b"opacity")
-        self.fade_anim.setDuration(500)
-        self.fade_anim.setStartValue(0.0)
-        self.fade_anim.setEndValue(1.0)
-        self.fade_anim.start()
 
 
     def on_tray_activated(self, reason):
@@ -660,33 +708,10 @@ class WGGui(QWidget):
             event.ignore()
 
     def update_tray_icon(self):
-        connected = self.active_profile and self.is_interface_up()
-        icon_path = self.icon_connected_path if connected else self.icon_disconnected_path
-        self.tray_icon.setIcon(QIcon(icon_path))
-
-# Base tooltip
-        tooltip = [f"WireGuard: {'Connected' if connected else 'Disconnected'}"]
-
-        if self.active_profile:
-            tooltip.append(f"Profile: {self.active_profile}")
-
-        if connected:
-            try:
-                _, peer = self.parse_wg_show()
-                endpoint = peer.get("endpoint", "")
-                handshake = peer.get("handshake", "")
-                transfer = peer.get("transfer", "")
-
-                if endpoint:
-                    tooltip.append(f"Endpoint: {endpoint}")
-                if handshake:
-                    tooltip.append(f"Handshake: {handshake}")
-                if transfer:
-                    tooltip.append(f"Transfer: {transfer}")
-            except Exception as e:
-                tooltip.append("⚠ Failed to read status")
-
-        self.tray_icon.setToolTip("\n".join(tooltip))
+        if self.interface_up:
+            self.tray_icon.setIcon(QIcon(self.icon_connected_path))
+        else:
+            self.tray_icon.setIcon(QIcon(self.icon_disconnected_path))
 
     
     def load_profiles(self):
@@ -697,13 +722,14 @@ class WGGui(QWidget):
                 item = QListWidgetItem(profile)
                 item.setData(Qt.ItemDataRole.UserRole, profile)
                 font = QFont()
-                font.setBold(True)
+                font.setBold(False)
                 font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
                 item.setFont(font)
                 self.list.addItem(item)
 
     def refresh_status(self):
         up = self.is_interface_up()
+        self.interface_up = up
         for i in range(self.list.count()):
             itm = self.list.item(i)
             prof = itm.data(Qt.ItemDataRole.UserRole)
@@ -732,6 +758,8 @@ class WGGui(QWidget):
             itm.setFont(font)
             itm.setText(prof)
         self.update_detail_panel()
+        # Force re-evaluation of the status dot and text
+        self.update_detail_panel()
         
 # Tray icon connected
         self.update_tray_icon()
@@ -747,9 +775,12 @@ class WGGui(QWidget):
 
     def is_interface_up(self):
         try:
-            out = subprocess.check_output(["wg", "show", SYSTEM_IFACE]).decode()
-            return "interface:" in out
-        except subprocess.CalledProcessError:
+            result = subprocess.run(
+                ["doas", "wg", "show", SYSTEM_IFACE],
+                capture_output=True, text=True
+            )
+            return f"interface: {SYSTEM_IFACE}" in result.stdout
+        except Exception:
             return False
 
     def update_detail_panel(self):
@@ -784,7 +815,8 @@ class WGGui(QWidget):
             self.lbl_port.setText(conf_port)
         if self.is_interface_up() and show_profile == self.active_profile:
             iface, peer = self.parse_wg_show()
-            # Add green circle next to "Up"
+            
+# Add green circle next to "Up"
             pix = QPixmap(12, 12)
             pix.fill(Qt.GlobalColor.transparent)
             p = QPainter(pix)
@@ -830,18 +862,30 @@ class WGGui(QWidget):
         prof = itm.data(Qt.ItemDataRole.UserRole)
         self.active_profile = prof
         src = os.path.join(WG_DIR, f"{prof}.conf")
-        
-# Kill any previous route_monitor.sh processes for wg0
-        subprocess.run(["pkill", "-f", "route_monitor.sh start wg0"], shell=True)
 
+        # Kill any previous route_monitor.sh processes for wg0
+        subprocess.run('pkill -f "route_monitor.sh start wg0"', shell=True)
         cmds = []
 
-# Always use wg0 by copying the selected profile to the system path
+        # Always use wg0 by copying the selected profile to the system path
         cmds.append(["doas", "cp", src, SYSTEM_CONF])
-        if self.is_interface_up():
-            cmds.append(["doas", WG_QUICK, "down", SYSTEM_IFACE])
-            cmds.append(["sleep", "1"])
+
+        # Defensive cleanup before bringing up wg0
+        cmds.append(["doas", WG_QUICK, "down", SYSTEM_IFACE])
+        cmds.append(["doas", "ifconfig", SYSTEM_IFACE, "destroy"])
+        cmds.append(["sleep", "0.5"])
+
+        # Bring interface up fresh
         cmds.append(["doas", WG_QUICK, "up", SYSTEM_IFACE])
+
+        # Sanity check: ensure interface is up
+        def _sanity_check_iface(log, iface):
+            result = subprocess.run(["ifconfig", iface], capture_output=True, text=True)
+            if iface not in result.stdout:
+                log.append(f"[!] Interface {iface} not present after wg-quick up — retrying...\n")
+                # Optional: implement retry logic if needed
+        # We'll call this after the run_next finishes all commands
+
         SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
         POSTUP_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "global_postup.sh")
         cmds.append([POSTUP_SCRIPT, SYSTEM_IFACE])
@@ -855,10 +899,14 @@ class WGGui(QWidget):
 
         self.commands, self.cmd_index = cmds, 0
         self.log.clear()
+        self.log.setPlainText("")  # Ensure QTextEdit is flushed clean
         self.run_next()
         self.update_tray_icon()
 
-# Update toggle button state and text
+# After bringing up, run the sanity check (after all commands finish)
+        QTimer.singleShot(2000, lambda: _sanity_check_iface(self.log, SYSTEM_IFACE))
+
+# Update toggle button state and text (moved after run_next and update_tray_icon for UI sync)
         self.btnToggle.setChecked(True)
         self.btnToggle.style().unpolish(self.btnToggle)
         self.btnToggle.style().polish(self.btnToggle)
@@ -870,21 +918,61 @@ class WGGui(QWidget):
         self.btnProfileToggle.setText("Disconnect")
         print("DEBUG: btnToggle text set to:", self.btnToggle.text(), file=sys.stderr)
 
-# Flush routes on disconnect
-    def on_disconnect(self): 
-        self.log.append("🔻 Disconnecting interface and flushing routes...\n")
-        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-        FLUSH_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "flush_wg_routes.sh")
-        self.commands = [
-            [WG_QUICK, "down", SYSTEM_IFACE],
-            [FLUSH_SCRIPT, SYSTEM_IFACE]
-        ]
-        self.cmd_index = 0
-        self.active_profile = None
-        self.log.clear()
-        self.run_next()
+    def on_disconnect(self):
+        if not self.is_interface_up():
+            self.append_log("Interface is already down.")
+            # Clean up button states to avoid mismatch
+            self.btnToggle.setChecked(False)
+            self.btnToggle.setText("Activate")
+            self.btnProfileToggle.setChecked(False)
+            self.btnProfileToggle.setText("Connect")
+            return
 
-# Reset toggle button state
+        self.append_log("🔻 Disconnecting interface and flushing routes...")
+
+        cmds = []
+        cmds.append(["doas", WG_QUICK, "down", SYSTEM_IFACE])
+        cmds.append(["doas", "ifconfig", SYSTEM_IFACE, "destroy"])
+        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+        POSTDOWN_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "global_postdown.sh")
+        cmds.append([POSTDOWN_SCRIPT, SYSTEM_IFACE])
+
+        self.commands = cmds
+        self.cmd_index = 0
+        self.run_next()
+        # Ensure proper sync of toggle button states after disconnect
+        self.btnToggle.setChecked(False)
+        self.btnToggle.setText("Activate")
+        self.btnProfileToggle.setChecked(False)
+        self.btnProfileToggle.setText("Connect")
+
+    def handle_down_output(self):
+        output = bytes(self.down_process.readAllStandardOutput()).decode("utf-8")
+        if output:
+            self.append_log(output)
+        error_output = bytes(self.down_process.readAllStandardError()).decode("utf-8")
+        if error_output:
+            self.append_log(error_output)
+
+    def handle_down_finished(self):
+        # Destroy the interface if it still exists
+        subprocess.run(["doas", "ifconfig", SYSTEM_IFACE, "destroy"], stderr=subprocess.DEVNULL)
+        self.append_log("[DEBUG] wg-quick down finished.")
+        self.toggle_state = False
+        self.update_toggle_button()
+        self.tray_icon.setIcon(QIcon(self.icon_disconnected_path))
+        self.btnToggle.setText("Activate")
+        self.btnToggle.setChecked(False)
+        if hasattr(self, "status_label"):
+            self.status_label.setText("Interface: Disconnected")
+
+    def append_log(self, text):
+        self.log.moveCursor(QTextCursor.MoveOperation.End)
+        self.log.insertPlainText(text if text.endswith("\n") else text + "\n")
+        self.log.moveCursor(QTextCursor.MoveOperation.End)
+
+    def update_toggle_button(self):
+        # Synchronize toggle button state and text
         self.btnToggle.setChecked(False)
         self.btnToggle.setText("Activate")
         self.btnProfileToggle.setChecked(False)
@@ -905,23 +993,115 @@ class WGGui(QWidget):
 
     def on_profile_toggle(self, checked):
         print("DEBUG: profile_toggle changed to", checked, file=sys.stderr)
+        itm = self.list.currentItem()
+        if not itm:
+            self.log.append("⚠ Select a profile first.\n")
+            return
+        prof = itm.data(Qt.ItemDataRole.UserRole)
+        self.active_profile = prof
+        src = os.path.join(WG_DIR, f"{prof}.conf")
         if checked:
-            self.on_connect()
+            # Connect logic with robust down/up/retry
+            # Kill any previous route_monitor.sh processes for wg0
+            subprocess.run('pkill -f "route_monitor.sh start wg0"', shell=True)
+            cmds = []
+            # Always use wg0 by copying the selected profile to the system path
+            cmds.append(["doas", "cp", src, SYSTEM_CONF])
+            # Defensive cleanup before bringing up wg0
+            if self.is_interface_up():
+                cmds.append(["doas", WG_QUICK, "down", SYSTEM_IFACE])
+                cmds.append(["sleep", "1"])
+                cmds.append(["doas", "ifconfig", SYSTEM_IFACE, "destroy"])
+            else:
+                self.log.append("> Interface is already down.")
+            # Add wg-quick up and retry if interface not present
+            cmds.append(["doas", WG_QUICK, "up", SYSTEM_IFACE])
+            cmds.append(["sleep", "0.5"])
+            cmds.append(["/bin/sh", "-c", f"! ifconfig {SYSTEM_IFACE} > /dev/null 2>&1 && echo '[!] Interface {SYSTEM_IFACE} not present after wg-quick up — retrying...'"])
+            cmds.append(["doas", WG_QUICK, "up", SYSTEM_IFACE])
+            SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+            POSTUP_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "global_postup.sh")
+            cmds.append([POSTUP_SCRIPT, SYSTEM_IFACE])
+            with open(src) as f:
+                for ln in f:
+                    if ln.startswith("#ping "):
+                        parts = ln.strip().split()
+                        if len(parts) >= 2:
+                            ip = parts[1]
+                            cmds.append(["ping", "-c", PING_COUNT, ip])
+            self.commands, self.cmd_index = cmds, 0
+            self.log.clear()
+            self.run_next()
+            self.update_tray_icon()
+            # After bringing up, run the sanity check (after all commands finish)
+            def _sanity_check_iface(log, iface):
+                tries = 0
+                max_tries = 3
+                while tries < max_tries:
+                    result = subprocess.run(["ifconfig", iface], capture_output=True, text=True)
+                    if iface in result.stdout:
+                        log.append(f"[+] Interface {iface} present after wg-quick up.\n")
+                        return
+                    else:
+                        log.append(f"[!] Interface {iface} not present after wg-quick up — retrying ({tries+1}/{max_tries})...\n")
+                        time.sleep(1)
+                        subprocess.run(["doas", WG_QUICK, "up", iface])
+                    tries += 1
+                log.append(f"[X] Interface {iface} still not present after {max_tries} attempts. Giving up.\n")
+            QTimer.singleShot(2000, lambda: _sanity_check_iface(self.log, SYSTEM_IFACE))
+            self.btnToggle.setChecked(True)
+            self.btnToggle.style().unpolish(self.btnToggle)
+            self.btnToggle.style().polish(self.btnToggle)
+            self.btnToggle.update()
+            self.btnToggle.setText("Deactivate")
             self.btnProfileToggle.setText("Disconnect")
+            self.btnProfileToggle.setChecked(True)
         else:
+            self.log.append("🔻 Disconnecting...\n")
             self.on_disconnect()
             self.btnProfileToggle.setText("Connect")
+            self.btnProfileToggle.setChecked(False)
+            self.btnToggle.setText("Activate")
+            self.btnToggle.setChecked(False)
             
     def run_next(self):
-        if self.cmd_index < len(self.commands):
-            c = self.commands[self.cmd_index]
-            self.cmd_index += 1
-            self.log.append(f"> {' '.join(c)}\n")
-            self.process.start(c[0], c[1:])
-        else:
+        if self.cmd_index >= len(self.commands):
+            return
 
-# All commands done; refresh status after short delay
-            QTimer.singleShot(500, self.refresh_status)
+        cmd = self.commands[self.cmd_index]
+        self.append_log(f"> {' '.join(cmd)}")
+
+        # Clean up previous QProcess if running
+        if hasattr(self, "process") and self.process is not None:
+            self.process.readyReadStandardOutput.disconnect()
+            self.process.readyReadStandardError.disconnect()
+            self.process.finished.disconnect()
+            self.process.kill()
+            self.process.deleteLater()
+
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self.handle_stdout)
+        self.process.readyReadStandardError.connect(self.handle_stderr)
+        self.process.finished.connect(self.run_next_finished)
+        self.process.start(cmd[0], cmd[1:])
+
+    def run_next_finished(self):
+        self.cmd_index += 1
+        self.run_next()
+
+    def handle_stdout(self):
+        output = self.process.readAllStandardOutput().data().decode()
+        if output:
+            # Append output line-by-line
+            for line in output.splitlines(True):
+                self.append_log(line)
+
+    def handle_stderr(self):
+        err = self.process.readAllStandardError().data().decode()
+        if err:
+            for line in err.splitlines(True):
+                self.append_log(line)
 
     def on_stdout(self):
         out = self.process.readAllStandardOutput().data().decode()
@@ -936,8 +1116,12 @@ class WGGui(QWidget):
     def parse_wg_show(self):
         return parse_wg_show()
 
+# Profile editor      
+
     def edit_selected_profile(self):
-        """Open the selected profile in a QPlainTextEdit dialog."""
+        """Open the selected profile in a QPlainTextEdit dialog with its public key displayed."""
+        # Move import to top of method for Qt.ItemDataRole.UserRole use
+        from PyQt6.QtCore import Qt
         itm = self.list.currentItem()
         if not itm:
             self.log.append("⚠ Select a profile to edit.\n")
@@ -955,65 +1139,62 @@ class WGGui(QWidget):
             self.log.append(f"⚠ Failed to read profile: {e}\n")
             return
 
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QPlainTextEdit
+        # Attempt to extract PrivateKey from [Interface] section
+        privkey = ""
+        in_interface = False
+        for line in content.splitlines():
+            lstripped = line.strip()
+            if lstripped.lower().startswith("[interface]"):
+                in_interface = True
+                continue
+            if lstripped.startswith("[") and not lstripped.lower().startswith("[interface]"):
+                in_interface = False
+            if in_interface and lstripped.lower().startswith("privatekey"):
+                _, privkey = lstripped.split("=", 1)
+                privkey = privkey.strip()
+                break
+
+        pubkey = "(invalid)"
+        if privkey:
+            try:
+                pubkey = subprocess.run(["wg", "pubkey"], input=privkey.encode(), stdout=subprocess.PIPE).stdout.decode().strip()
+            except Exception:
+                pass
+
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QPlainTextEdit, QLabel, QLineEdit
         from PyQt6.QtGui import QFont
-
-        class WireGuardHighlighter(QSyntaxHighlighter):
-            def __init__(self, document):
-                super().__init__(document)
-
-                self.rules = []
-
-                # Section headers
-                section_format = QTextCharFormat()
-                section_format.setForeground(QColor("#87CEFA"))  # Light blue
-                section_format.setFontWeight(QFont.Weight.Bold)
-                self.rules.append((QRegularExpression(r"^\[.*\]"), section_format))
-
-                # Key = value
-                key_format = QTextCharFormat()
-                key_format.setForeground(QColor("#90EE90"))  # Light green
-                self.rules.append((QRegularExpression(r"^\s*\w+\s*="), key_format))
-
-                # Comments
-                comment_format = QTextCharFormat()
-                # Adjust comment color for dark mode
-                if is_dark_mode():
-                    comment_format.setForeground(QColor("#BBBBBB"))  # Lighter gray for dark mode
-                else:
-                    comment_format.setForeground(QColor("#888888"))  # Gray
-                comment_format.setFontItalic(True)
-                self.rules.append((QRegularExpression(r"#.*$"), comment_format))
-
-            def highlightBlock(self, text):
-                for pattern, fmt in self.rules:
-                    match_iter = pattern.globalMatch(text)
-                    while match_iter.hasNext():
-                        match = match_iter.next()
-                        self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
+        # Qt already imported above in this method
 
         class EditorDialog(QDialog):
-            def __init__(self, parent=None, title="Edit", text=""):
+            def __init__(self, parent=None, title="Edit", text="", prof_name="", pubkey=""):
                 super().__init__(parent)
                 self.setWindowTitle(title)
                 self.setMinimumSize(600, 400)
 
+                self.profile_name = QLineEdit(prof_name)
+                self.profile_name.setReadOnly(True)
+
+                pubkey_label = QLabel(f"Public key: {pubkey}")
+                pubkey_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                pubkey_label.setStyleSheet("QLabel {{ font-family: monospace; padding: 4px; color: #4caf50; }}")
+
                 self.text_edit = QPlainTextEdit()
                 self.text_edit.setPlainText(text)
-
-                # Monospace font
-                font = QFont("monospace")
-                font.setStyleHint(QFont.StyleHint.TypeWriter)
+                font = QFont("SF Mono")
+                if not font.exactMatch():
+                    font = QFont("Menlo")
+                font.setStyleHint(QFont.StyleHint.Monospace)
                 self.text_edit.setFont(font)
-
-                # Apply syntax highlighting
-                WireGuardHighlighter(self.text_edit.document())
+                self.highlighter = WireGuardHighlighter(self.text_edit.document())
 
                 buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
                 buttons.accepted.connect(self.accept)
                 buttons.rejected.connect(self.reject)
 
                 layout = QVBoxLayout()
+                layout.addWidget(QLabel("Name:"))
+                layout.addWidget(self.profile_name)
+                layout.addWidget(pubkey_label)
                 layout.addWidget(self.text_edit)
                 layout.addWidget(buttons)
                 self.setLayout(layout)
@@ -1021,7 +1202,7 @@ class WGGui(QWidget):
             def get_text(self):
                 return self.text_edit.toPlainText()
 
-        dlg = EditorDialog(self, title=f"Edit Profile: {prof}", text=content)
+        dlg = EditorDialog(self, title=f"Edit Profile: {prof}", text=content, prof_name=prof, pubkey=pubkey)
         if dlg.exec():
             try:
                 with open(conf_path, "w") as f:
@@ -1032,47 +1213,77 @@ class WGGui(QWidget):
 
 # Add new profile
     def add_profile(self):
-        
-        from PyQt6.QtWidgets import QInputDialog, QDialog, QVBoxLayout, QDialogButtonBox, QPlainTextEdit
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QPlainTextEdit, QLabel, QLineEdit
         from PyQt6.QtGui import QFont
+        from PyQt6.QtCore import Qt
+        import subprocess
 
-        prof, ok = QInputDialog.getText(self, "New Profile", "Enter profile name:")
-        if not ok or not prof:
-            return
-        conf_path = os.path.join(WG_DIR, f"{prof}.conf")
-        if os.path.exists(conf_path):
-            QMessageBox.warning(self, "Error", f"Profile '{prof}' already exists.")
+        try:
+            privkey = subprocess.check_output(["wg", "genkey"]).decode().strip()
+            pubkey = subprocess.run(["wg", "pubkey"], input=privkey.encode(), stdout=subprocess.PIPE).stdout.decode().strip()
+        except Exception as e:
+            QMessageBox.warning(self, "Key Generation Failed", f"Failed to generate keys:\n{e}")
             return
 
-        template = "[Interface]\nAddress = \nPrivateKey = \nListenPort = \nDNS = \n\n[Peer]\nPublicKey = \nAllowedIPs = \nEndpoint = \n"
+        template = f"""[Interface]
+Address = 
+PrivateKey = {privkey}
+ListenPort = 
+DNS = 
+"""
 
         class EditorDialog(QDialog):
-            def __init__(self, parent=None, title="New Profile", text=""):
+            def __init__(self, parent=None, pubkey="", template=""):
                 super().__init__(parent)
-                self.setWindowTitle(title)
-                self.setMinimumSize(600, 400)
+                self.setWindowTitle("New WireGuard Profile")
+                self.setMinimumSize(640, 500)
+
+                self.profile_name = QLineEdit()
+                self.profile_name.setPlaceholderText("Enter profile name")
+
+                pubkey_label = QLabel(f"Public key: {pubkey}")
+                pubkey_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                pubkey_label.setStyleSheet("QLabel {{ font-family: monospace; padding: 4px; color: #4caf50; }}")
 
                 self.text_edit = QPlainTextEdit()
-                self.text_edit.setPlainText(text)
+                self.text_edit.setPlainText(template)
 
-                font = QFont("monospace")
-                font.setStyleHint(QFont.StyleHint.TypeWriter)
+                font = QFont("SF Mono")
+                if not font.exactMatch():
+                    font = QFont("Menlo")
+                font.setStyleHint(QFont.StyleHint.Monospace)
                 self.text_edit.setFont(font)
 
-                buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+                self.highlighter = WireGuardHighlighter(self.text_edit.document())
+
+                buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
                 buttons.accepted.connect(self.accept)
                 buttons.rejected.connect(self.reject)
 
                 layout = QVBoxLayout()
+                layout.addWidget(QLabel("Name:"))
+                layout.addWidget(self.profile_name)
+                layout.addWidget(pubkey_label)
                 layout.addWidget(self.text_edit)
                 layout.addWidget(buttons)
                 self.setLayout(layout)
 
+            def get_profile_name(self):
+                return self.profile_name.text().strip()
+
             def get_text(self):
                 return self.text_edit.toPlainText()
 
-        dlg = EditorDialog(self, title=f"New Profile: {prof}", text=template)
+        dlg = EditorDialog(self, pubkey=pubkey, template=template)
         if dlg.exec():
+            prof = dlg.get_profile_name()
+            if not prof:
+                QMessageBox.warning(self, "Invalid Name", "Profile name cannot be empty.")
+                return
+            conf_path = os.path.join(WG_DIR, f"{prof}.conf")
+            if os.path.exists(conf_path):
+                QMessageBox.warning(self, "Error", f"Profile '{prof}' already exists.")
+                return
             try:
                 with open(conf_path, "w") as f:
                     f.write(dlg.get_text())
