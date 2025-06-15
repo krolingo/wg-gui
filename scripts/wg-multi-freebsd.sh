@@ -70,8 +70,12 @@ bring_up() {
     doas route add -host "$SERVER_IP" "$LAN_GW"
   fi
 
-grep -A 10 '\[Peer\]' "$PROFILE_PATH" | grep '^AllowedIPs' | awk '{print $3}' | tr ',' '\n' | while read ip; do
+grep -A 10 '\[Peer\]' "$PROFILE_PATH" | grep '^AllowedIPs' | awk -F= '{print $2}' | tr ',' '\n' | while read ip; do
+  ip=$(echo "$ip" | xargs)  # Trim whitespace
+  [ -n "$ip" ] || continue  # Skip empty lines
+
   echo "🛣 Adding route for $ip via $INTERFACE"
+
   if [ "$ip" = "0.0.0.0/0" ]; then
     ORIGINAL_DEFAULT=$(netstat -rn | awk '$1=="default" { print $2; exit }')
     if [ -n "$ORIGINAL_DEFAULT" ]; then
@@ -83,6 +87,7 @@ grep -A 10 '\[Peer\]' "$PROFILE_PATH" | grep '^AllowedIPs' | awk '{print $3}' | 
     doas route add -net "$ip" -interface "$INTERFACE"
   fi
 done
+
 
 
   DNS_LINE=$(grep -m1 '^DNS[ 	]*=' "$PROFILE_PATH" | cut -d= -f2- | xargs)
