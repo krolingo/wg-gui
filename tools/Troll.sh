@@ -109,7 +109,7 @@ get_default_route() {
 get_ssid() {
     case "$(uname -s)" in
         Darwin)
-            ssid=$(python3 /Users/mcapella/scripts/get_ssid.py 2>/dev/null)
+            ssid=$(python3 ./get_ssid.py 2>/dev/null)
             ;;
         FreeBSD)
             ssid=$(
