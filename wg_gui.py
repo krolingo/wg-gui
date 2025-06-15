@@ -1,74 +1,98 @@
 #!/usr/bin/env python3
-import sys
+
+# === Imports ===
 import os
-import subprocess
-import time
+import sys
 import platform
 import shutil
+import subprocess
+import time
+import json
+import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
+import glob
+import re
 
-# PyQt6 imports
 from PyQt6.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPushButton, QTextEdit, QLabel, QFormLayout, QGroupBox, QSplitter, QSizePolicy,
-    QMessageBox, QSystemTrayIcon, QMenu, QFileDialog, QInputDialog, QDialog,
+    QApplication, QWidget, QSystemTrayIcon, QTabWidget, QVBoxLayout, QHBoxLayout,
+    QGroupBox, QPushButton, QListWidget, QLabel,
+    QListWidgetItem, QTextEdit, QFormLayout, QSplitter, QSizePolicy,
+    QMessageBox, QMenu, QFileDialog, QDialog,
     QDialogButtonBox, QPlainTextEdit, QStyle, QGraphicsDropShadowEffect,
-    QGraphicsOpacityEffect
+    QLineEdit, QGridLayout
 )
 from PyQt6.QtCore import (
-    QProcess, Qt, QTimer, QRegularExpression, QPropertyAnimation
+    QProcess, Qt, QTimer, QRegularExpression, QEvent, QSize, QRectF
 )
 from PyQt6.QtGui import (
     QFont, QIcon, QAction, QTextCursor, QPixmap, QPainter, QColor,
-    QSyntaxHighlighter, QTextCharFormat
+    QSyntaxHighlighter, QTextCharFormat, QRadialGradient
 )
+
 from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
-# --- Configuration ---
-WG_DIR = os.path.expanduser("~/scripts/wireguard_client/profiles")
+# === Feature Toggles ===
+ENABLE_TOOLS_TAB = True  # Toggle this to False to disable Tools tab
+
+PRIV_ESC = "sudo"  # or "doas"
+# === Constants and Paths ===
+WG_DIR = "/usr/local/etc/wireguard/profiles"
 SYSTEM_CONF_DIR = "/usr/local/etc/wireguard"
-if platform.system() == "Darwin":
-    SYSTEM_IFACE = "utun4"
-else:
-    SYSTEM_IFACE = "wg0"
-SYSTEM_CONF = os.path.join(SYSTEM_CONF_DIR, f"{SYSTEM_IFACE}.conf")
-PING_COUNT = "5"
+HOME_DIR = os.path.expanduser("~")
+IS_MACOS = platform.system() == "Darwin"
+# SCRIPT_BASE is a symlink 
+SCRIPT_BASE = "/usr/local/etc/wg-gui/scripts"
+WG_MULTI_SCRIPT = os.path.join(SCRIPT_BASE, "wg-multi-macos.sh" if IS_MACOS else "wg-multi-freebsd.sh")
+ACTIVE_MAP_PATH = os.path.join(SCRIPT_BASE, "active_connections.json")
+WG_UTUN_DIR = "/tmp/wg-multi"
+WG_UTUN_MAP = os.path.join(WG_UTUN_DIR, "wg-utun.map")
+
 REFRESH_INTERVAL = 5000  # milliseconds
 APP_INSTANCE_KEY = "wg_gui_single_instance"
+PING_COUNT = "5"
+APP_STYLESHEET = """
+QLabel.data-label {
+    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
+}
+"""
+ROW_HEIGHT = 28  # Tweak as needed
 
-# --- Platform Configuration ---
 if platform.system() == "Darwin":
     BASH = shutil.which("bash") or "/opt/homebrew/bin/bash"
     if not BASH.endswith("/bash") or "brew" not in BASH:
         BASH = "/opt/homebrew/bin/bash"
     WG_QUICK = "/opt/homebrew/bin/wg-quick"
-else:
-    BASH = "bash"
-    import os
-import platform
-import shutil
-
-# Platform-aware binary selection
-if platform.system() == "Darwin":
-    BASH = shutil.which("bash") or "/opt/homebrew/bin/bash"
-    if not BASH.endswith("/bash") or "brew" not in BASH:
-        BASH = "/opt/homebrew/bin/bash"
-    WG_QUICK = "/opt/homebrew/bin/wg-quick"
+    SYSTEM_IFACE = "utun"
+    # WG_MULTI_SCRIPT assignment is handled above
     os.environ["PATH"] = "/opt/homebrew/bin:" + os.environ["PATH"]
 else:
     BASH = "bash"
     WG_QUICK = "/usr/local/bin/wg-quick"
+    SYSTEM_IFACE = "wg0"
+SYSTEM_CONF = os.path.join(SYSTEM_CONF_DIR, f"{SYSTEM_IFACE}.conf")
 
-# --- Stylesheet ---
-APP_STYLESHEET = """
-QLabel.data-label {
-    font-family: "Consolas","IBM Plex Mono", "JetBrains Mono", monospace;
-    /* text-shadow: 2px 2px 2px rgba(0, 0, 0, 0); */
+# Key Maps (for dynamic label hiding)
+IFACE_KEY_MAP = {
+    "Addresses":   "addresses",
+    "Listen Port": "port",
+    "MTU":         "mtu",
+    "DNS":         "dns",
+    "Public Key":  "pubkey",
+    "Private Key": "privkey",
 }
-"""
+PEER_KEY_MAP = {
+    "Public Key":          "pubkey",
+    "PreShared Key":       "preshared_key",
+    "Allowed IPs":         "allowed_ips",
+    "Endpoint":            "endpoint",
+    "PersistentKeepalive": "persistent_keepalive",
+}
 
-# --- Utility Functions ---
+active_connections = {}
+
+# === Utilities ===
+
 def is_dark_mode():
     env_override = os.environ.get("WG_GUI_FORCE_THEME", "").lower()
     if env_override in ("dark", "light"):
@@ -104,8 +128,7 @@ def is_dark_mode():
 def is_already_running():
     socket = QLocalSocket()
     socket.connectToServer(APP_INSTANCE_KEY)
-    running = socket.waitForConnected(100)
-    return running
+    return socket.waitForConnected(100)
 
 def create_instance_lock():
     server = QLocalServer()
@@ -113,6 +136,45 @@ def create_instance_lock():
         server.removeServer(APP_INSTANCE_KEY)
         server.listen(APP_INSTANCE_KEY)
     return server
+
+def get_utun_for_profile(prof):
+    if not os.path.exists(WG_UTUN_MAP):
+        return None
+    conf_filename = f"{prof}.conf"
+    with open(WG_UTUN_MAP, "r") as f:
+        for line in f:
+            if "|" not in line:
+                continue
+            iface, conf = line.strip().split("|", 1)
+            if os.path.basename(conf) == conf_filename:
+                return iface
+    return None
+
+def is_low_utun(iface):
+    if not iface or not iface.startswith("utun"):
+        return False
+    try:
+        num = int(iface[4:])
+        return 0 <= num <= 4
+    except Exception:
+        return False
+
+def load_active_connections():
+    global active_connections
+    try:
+        if os.path.exists(ACTIVE_MAP_PATH):
+            with open(ACTIVE_MAP_PATH, "r") as f:
+                active_connections = json.load(f)
+    except Exception as e:
+        print(f"[DEBUG] Failed to load active connections: {e}")
+        active_connections = {}
+
+def save_active_connections():
+    try:
+        with open(ACTIVE_MAP_PATH, "w") as f:
+            json.dump(active_connections, f, indent=2)
+    except Exception as e:
+        print(f"[DEBUG] Failed to save active connections: {e}")
 
 def time_ago(epoch):
     delta = time.time() - epoch
@@ -125,11 +187,11 @@ def time_ago(epoch):
     else:
         return f"{int(delta // 86400)}d ago"
 
-def parse_wg_show():
+def parse_wg_show(iface_name=SYSTEM_IFACE):
     iface_info, peer_info = {}, {}
     try:
         out = subprocess.check_output(
-            ["doas","wg", "show", SYSTEM_IFACE],
+            [PRIV_ESC, "wg", "show", iface_name],
         ).decode().strip()
         lines = out.splitlines()
         for line in lines:
@@ -161,7 +223,16 @@ def parse_wg_conf(profile_path):
     with open(profile_path) as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith('#'):
+            if not line:
+                continue
+            if line.lower().startswith('#ping'):
+                try:
+                    _, v = line.split(None, 1)
+                    peer['ping'] = v.strip()
+                except ValueError:
+                    pass
+                continue
+            if line.startswith('#'):
                 continue
             if line.lower() == '[interface]':
                 in_peer = False
@@ -177,6 +248,8 @@ def parse_wg_conf(profile_path):
                     peer['pubkey'] = v
                 elif k.lower() == 'allowedips':
                     peer['allowed_ips'] = v
+                elif k.lower() == 'presharedkey':
+                    peer['preshared_key'] = v    
                 elif k.lower() == 'endpoint':
                     peer['endpoint'] = v
             else:
@@ -188,30 +261,46 @@ def parse_wg_conf(profile_path):
                     interface['privatekey'] = v
                 elif k.lower() == 'listenport':
                     interface['port'] = v
+                elif k.lower() == 'mtu':
+                    interface['mtu'] = v    
     return interface, peer
+
+def hide_empty_rows(form_layout, config, defaults):
+    for row in range(form_layout.rowCount()):
+        lbl_widget = form_layout.itemAt(row, QFormLayout.ItemRole.LabelRole).widget()
+        fld_widget = form_layout.itemAt(row, QFormLayout.ItemRole.FieldRole).widget()
+        label_text = lbl_widget.text().rstrip(":")
+        if label_text not in defaults:
+            cfg_key = label_text.lower().replace(" ", "_")
+            val = config.get(cfg_key)
+            if not val:
+                lbl_widget.hide()
+                fld_widget.hide()
+            else:
+                lbl_widget.show()
+                fld_widget.show()
+
+class LogTextEdit(QTextEdit):
+    def mouseDoubleClickEvent(self, event):
+        super().mouseDoubleClickEvent(event)
+        sb = self.verticalScrollBar()
+        sb.setValue(sb.maximum())
 
 class WireGuardHighlighter(QSyntaxHighlighter):
     def __init__(self, document):
         super().__init__(document)
         self.rules = []
-
         section_format = QTextCharFormat()
-        section_format.setForeground(QColor("#87CEFA"))  # Light blue
+        section_format.setForeground(QColor("#87CEFA"))
         section_format.setFontWeight(QFont.Weight.Bold)
         self.rules.append((QRegularExpression(r"^\s*\[.*\]\s*$"), section_format))
-
         key_format = QTextCharFormat()
-        key_format.setForeground(QColor("#90EE90"))  # Light green
+        key_format.setForeground(QColor("#90EE90"))
         self.rules.append((QRegularExpression(r"^\s*\w+\s*="), key_format))
-
         comment_format = QTextCharFormat()
-        if is_dark_mode():
-            comment_format.setForeground(QColor("#BBBBBB"))
-        else:
-            comment_format.setForeground(QColor("#888888"))
+        comment_format.setForeground(QColor("#BBBBBB") if is_dark_mode() else QColor("#888888"))
         comment_format.setFontItalic(True)
         self.rules.append((QRegularExpression(r"#.*$"), comment_format))
-
     def highlightBlock(self, text):
         for pattern, fmt in self.rules:
             match_iter = pattern.globalMatch(text)
@@ -219,280 +308,422 @@ class WireGuardHighlighter(QSyntaxHighlighter):
                 match = match_iter.next()
                 self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
 
+class ProfileEditorDialog(QDialog):
+    def __init__(self, parent=None, title="Edit", text="", prof_name="", pubkey="", editable_name=False):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(600, 400)
+        self.profile_name = QLineEdit(prof_name)
+        self.profile_name.setReadOnly(not editable_name)
+        pubkey_label = QLabel(f"Public key: {pubkey}")
+        pubkey_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        pubkey_label.setStyleSheet("QLabel {{ font-family: monospace; padding: 4px; color: #4caf50; }}")
+        self.text_edit = QPlainTextEdit()
+
+        self.text_edit.setPlainText(text)
+        font = QFont("Consolas")
+        if not font.exactMatch():
+            font = QFont("SF Mono")
+        if not font.exactMatch():
+            font = QFont("Menlo")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.text_edit.setFont(font)
+
+        self.highlighter = WireGuardHighlighter(self.text_edit.document())
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Name:"))
+        layout.addWidget(self.profile_name)
+        layout.addWidget(pubkey_label)
+        layout.addWidget(self.text_edit)
+        layout.addWidget(buttons)
+        self.setLayout(layout)
+    def get_profile_name(self):
+        return self.profile_name.text().strip()
+    def get_text(self):
+        return self.text_edit.toPlainText()
+
+# ==== Main GUI ====
+
+from PyQt6.QtCore import QThread, QObject, pyqtSignal
+
+class ToolRunner(QThread):
+    def __init__(self, script_path):
+        super().__init__()
+        class _Signals(QObject):
+            output = pyqtSignal(str)
+            error = pyqtSignal(str)
+            done = pyqtSignal()
+        self.script_path = script_path
+        self.signals = _Signals()
+        self.output = self.signals.output
+        self.error = self.signals.error
+        self.done = self.signals.done
+        self.start_time = None
+
+    def run(self):
+        import shlex, subprocess
+        try:
+            process = subprocess.Popen(
+                shlex.split(self.script_path),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
+            # Stream stdout
+            if process.stdout:
+                for line in iter(process.stdout.readline, ''):
+                    if line == '':
+                        break
+                    self.output.emit(line.rstrip())
+            # Stream stderr
+            if process.stderr:
+                for line in iter(process.stderr.readline, ''):
+                    if line == '':
+                        break
+                    self.error.emit(line.rstrip())
+            process.wait()
+        except Exception as e:
+            self.error.emit(f"❌ {e}")
+        self.done.emit()
+
+    def start(self):
+        self.start_time = time.time()
+        super().start()
+
+    # ... All GUI logic goes here
 
 class WGGui(QWidget):
+    def tear_down_full_tunnels(self, prof):
+        """Tear down any other active full-tunnel before connecting prof."""
+        active_profiles = {}
+        try:
+            if os.path.exists(WG_UTUN_MAP):
+                with open(WG_UTUN_MAP, "r") as f:
+                    for line in f:
+                        if "|" not in line:
+                            continue
+                        iface, conf = line.strip().split("|", 1)
+                        if conf.endswith(".conf"):
+                            name = os.path.splitext(os.path.basename(conf))[0]
+                            active_profiles[name] = iface
+        except Exception:
+            pass
+        for other_prof, other_iface in active_profiles.items():
+            if other_prof == prof:
+                continue
+            try:
+                other_conf = os.path.join(WG_DIR, f"{other_prof}.conf")
+                with open(other_conf) as ocf:
+                    if "0.0.0.0/0" in ocf.read():
+                        self.log.append(f"🛑 Tearing down active full-tunnel: {other_prof}")
+                        subprocess.run([PRIV_ESC, WG_MULTI_SCRIPT, "down", f"{other_prof}.conf"])
+                        time.sleep(1)
+            except Exception as e:
+                self.log.append(f"⚠ Error tearing down {other_prof}: {e}")
+    def on_active_selected(self, item, prev):
+        # Called when an item in the Active tab is selected
+        if not item:
+            return
+        prof = item.data(Qt.ItemDataRole.UserRole)
+        # Optionally, select the corresponding item in the Profiles list
+        for i in range(self.list.count()):
+            if self.list.item(i).data(Qt.ItemDataRole.UserRole) == prof:
+                self.list.setCurrentRow(i)
+                break
+
+    def on_profile_double_clicked(self, item):
+        # Double-click: toggle activation exactly as the green button
+        if not item:
+            return
+        prof = item.data(Qt.ItemDataRole.UserRole)
+        # Select the profile
+        self.list.setCurrentItem(item)
+        # Determine desired state: True=connect, False=disconnect
+        should_connect = not bool(self.is_interface_up(prof))
+        # Invoke the toggle handler directly
+        self.on_toggle_state(should_connect)
+
     def __init__(self):
         super().__init__()
-        self.interface_up = False
+        if platform.system() == "Darwin":
+         try:
+             output = subprocess.check_output(
+                 ["ifconfig", "-l"],
+                 stdout=subprocess.DEVNULL,
+                 stderr=subprocess.DEVNULL
+             ).decode()
+             utuns = [u for u in output.strip().split() if u.startswith("utun")]
+             for u in utuns:
+                 try:
+                     subprocess.check_call(
+                         [PRIV_ESC, "wg", "show", u],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL
+                     )
+                 except subprocess.CalledProcessError:
+                     print(f"Cleaning up orphaned {u}...", file=sys.stderr)
+                     subprocess.run(
+                         [PRIV_ESC, "ifconfig", u, "destroy"],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL
+                     )
+         except Exception as e:
+             print(f"Orphan utun cleanup error: {e}", file=sys.stderr)
 
-# --- Robust icon resource location ---
+        # --- Icons and resources ---
         icon_names = ["wireguard_off.png", "wg_connected.png"]
-        icon_paths = []
-
-# Try all possible locations where the icons might live
-        candidate_dirs = []
+        candidate_dirs = [
+            os.path.join(os.path.dirname(__file__), "Icons"),
+            os.path.join(os.getcwd(), "Resources", "Icons"),
+        ]
         if getattr(sys, 'frozen', False):
             bundle_dir = os.path.dirname(sys.executable)
-            candidate_dirs.append(os.path.normpath(os.path.join(bundle_dir, '..', 'Resources', 'Icons')))
-        candidate_dirs.append(os.path.join(os.path.dirname(__file__), "Icons"))
-
-# Just in case, check also a flat 'Resources/Icons' under cwd
-        candidate_dirs.append(os.path.join(os.getcwd(), "Resources", "Icons"))
-
-        resource_dir = None
-        for d in candidate_dirs:
-            missing = [name for name in icon_names if not os.path.exists(os.path.join(d, name))]
-            if not missing:
-                resource_dir = d
-                break
+            candidate_dirs.insert(0, os.path.normpath(os.path.join(bundle_dir, '..', 'Resources', 'Icons')))
+        resource_dir = next((d for d in candidate_dirs if all(os.path.exists(os.path.join(d, n)) for n in icon_names)), None)
         if not resource_dir:
-
-# Give up: show dialog, print error, exit
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.critical(None, "WireGuardClient Error",
                 "Can't find required icon files in:\n\n" +
                 "\n".join(candidate_dirs) +
                 "\n\nMissing files: " + ", ".join(icon_names)
             )
             sys.exit(2)
-        print("USING ICON DIR:", resource_dir)
-        print("ICON FILES:", os.listdir(resource_dir))
-
         self.resource_dir = resource_dir
-        self.icon_disconnected_path = os.path.join(self.resource_dir, "wireguard_off.png")
-        self.icon_connected_path = os.path.join(self.resource_dir, "wg_connected.png")
-
-# Initialize active_profile early so update_tray_icon never errors
-        self.active_profile = None
-        self.setWindowIcon(QIcon(os.path.join(os.path.dirname(__file__), "wireguard.png")))
+        self.icon_disconnected_path = os.path.join(resource_dir, "wireguard_off.png")
+        self.icon_connected_path = os.path.join(resource_dir, "wg_connected.png")
+        self.setWindowIcon(QIcon(os.path.join(resource_dir, "wireguard_off.png")))
         self.setWindowTitle("WireGuard Client")
         self.resize(900, 700)
         self.setMinimumHeight(600)
-        self.quitting = False  # <-- NEW LINE to track if user explicitly quit
+        self.quitting = False
+        self.active_profile = None
 
-# ----- System Tray Setup -----
-
-# Set icon paths for connected/disconnected states
-        self.icon_disconnected_path = os.path.join(resource_dir, "wireguard_off.png")
-        self.icon_connected_path = os.path.join(resource_dir, "wg_connected.png")
-    
-# Debug print for icon path existence
-        print("DEBUG: Loading tray icon from", self.icon_disconnected_path, "exists:", os.path.exists(self.icon_disconnected_path), file=sys.stderr)
-        
-# Initialize tray icon with the disconnected icon
-        disconnected_icon = QIcon(self.icon_disconnected_path)
-        self.tray_icon = QSystemTrayIcon(disconnected_icon, self)
-
-# Explicitly set the icon to make sure it’s recognized
-        self.tray_icon.setIcon(QIcon(self.icon_disconnected_path))
-
-# Ensure the tray icon is visible
-        self.tray_icon.show()
-
-# Update icon based on current status
-        self.update_tray_icon()
-
-# Build the context menu with theme-aware icons
+        # --- System Tray ---
         theme_suffix = "dark" if is_dark_mode() else "light"
         tray_menu = QMenu()
-        self.act_show = QAction(QIcon(os.path.join(self.resource_dir, f"eye_{theme_suffix}.svg")), "Show", self)
-        self.act_disconnect = QAction(QIcon(os.path.join(self.resource_dir, f"plug-off_{theme_suffix}.svg")), "Disconnect", self)
-        self.act_quit = QAction(QIcon(os.path.join(self.resource_dir, f"logout_{theme_suffix}.svg")), "Disconnect & Quit", self)
+        self.act_show = QAction(QIcon(os.path.join(resource_dir, f"eye_{theme_suffix}.svg")), "Show", self)
+        self.act_disconnect = QAction(QIcon(os.path.join(resource_dir, f"plug-off_{theme_suffix}.svg")), "Disconnect", self)
+        self.act_disconnect_all = QAction(QIcon(os.path.join(resource_dir, f"plug-off_{theme_suffix}.svg")), "Disconnect All", self)
+        self.act_disconnect_quit = QAction(QIcon(os.path.join(resource_dir,  f"power_{theme_suffix}.svg")), "Disconnect + Quit", self)
+        self.act_quit_only = QAction(QIcon(os.path.join(resource_dir, f"logout_{theme_suffix}.svg")), "Quit", self)
+
         tray_menu.addAction(self.act_show)
         tray_menu.addAction(self.act_disconnect)
+        tray_menu.addAction(self.act_disconnect_all)
         tray_menu.addSeparator()
-        tray_menu.addAction(self.act_quit)
+        tray_menu.addAction(self.act_disconnect_quit)
+        tray_menu.addAction(self.act_quit_only)
+
+        self.tray_icon = QSystemTrayIcon(QIcon(self.icon_disconnected_path), self)
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.activated.connect(self.on_tray_activated)
-
-# Connect actions to methods
-        self.act_show.triggered.connect(self.show_and_raise)
-        self.act_disconnect.triggered.connect(self.on_disconnect)
-        self.act_quit.triggered.connect(self.quit_and_disconnect)
-
         self.tray_icon.show()
 
-        self.list = QListWidget()
-        self.list.setMinimumHeight(260)
-        self.list.setMaximumHeight(400)
-        list_font = QFont()
+        self.act_show.triggered.connect(self.show_and_raise)
+        self.act_disconnect.triggered.connect(self.on_disconnect)
+        self.act_disconnect_all.triggered.connect(self.on_disconnect_all)
+        self.act_disconnect_quit.triggered.connect(self.quit_and_disconnect)
+        self.act_quit_only.triggered.connect(lambda: QApplication.instance().quit())
 
-# List font size        
-        list_font.setPointSize(12)  # Try 9 or 8 for even smaller rows
+        # --- Profile List and Buttons ---
+        self.list = QListWidget()
+        # self.list.setStyleSheet("...")  # StyleSheet removed per instructions
+        self.list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        list_font = QFont()
+        list_font.setPointSize(11)
         list_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         self.list.setFont(list_font)
-
-        self.list.setSpacing(-1)
-        self.list.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        self.list.setMinimumWidth(300)
-        self.list.setMaximumWidth(300)
+        self.list.setSpacing(-2)
+        # self.list.setMinimumWidth(300)
+        # self.list.setMaximumWidth(300)
         self.list.currentItemChanged.connect(self.update_detail_panel)
+        self.list.setIconSize(QSize(18, 18))
+        # Double-click toggles activation state
+        self.list.itemDoubleClicked.connect(self.on_profile_double_clicked)
 
-        # Remove any custom visual effects/styles on list items (shadows, borders, gradients)
-        # If you had set a stylesheet for QListWidget::item or similar, it should be removed.
-        # self.list.setStyleSheet("")  # Uncomment if you had previously set item styles
-
+        # --- Interface and Peer Group ---
         label_font = QFont()
         label_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-        
         left_label_font = QFont()
         left_label_font.setBold(True)
         left_label_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
 
-
         self.intf_group = QGroupBox("Interface: -")
         intf_title_font = QFont()
         intf_title_font.setBold(True)
-        intf_title_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         self.intf_group.setFont(intf_title_font)
-        self.intf_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.intf_form_layout = QFormLayout()
+        self.intf_form_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        self.intf_form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        self.intf_form_layout.setVerticalSpacing(8)
+        self.intf_form_layout.setHorizontalSpacing(32)
+        self.intf_form_layout.setSpacing(8)
+        self.intf_form_layout.setContentsMargins(12, 12, 12, 12)
 
-        intf_form = QFormLayout()
-        self.intf_form_layout = intf_form
-
-        intf_form.setVerticalSpacing(12)
-        intf_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        intf_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        intf_form.setHorizontalSpacing(40)
-        intf_form.setSpacing(2)
-        intf_form.setContentsMargins(0, 0, 0, 0)
-
-# Status: dot + text
+        # --- Status Dot Row ---
         self.status_dot = QLabel()
+        self.status_dot.setFixedSize(ROW_HEIGHT, ROW_HEIGHT)
+        self.status_dot.setMinimumSize(ROW_HEIGHT, ROW_HEIGHT)
         self.status_text = QLabel()
-        status_layout = QHBoxLayout()
+        self.status_text.setMinimumHeight(ROW_HEIGHT)
+        self.status_text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        status_row = QWidget()
+        status_layout = QHBoxLayout(status_row)
         status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(6)
-        status_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        status_layout.setSpacing(8)
         status_layout.addWidget(self.status_dot)
         status_layout.addWidget(self.status_text)
-        status_layout.setSpacing(4)
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        status_container = QWidget()
-        status_container.setLayout(status_layout)
+        status_row.setMinimumHeight(ROW_HEIGHT)
+        status_row.setMaximumHeight(ROW_HEIGHT)
+
+        # --- Data Labels ---
         self.lbl_pubkey = QLabel()
         self.lbl_port = QLabel()
         self.lbl_addresses = QLabel()
         self.lbl_dns = QLabel()
-
-        for lbl in (self.status_dot, self.status_text, self.lbl_pubkey, self.lbl_port,
-                    self.lbl_addresses, self.lbl_dns):
+        self.lbl_mtu = QLabel()
+        for lbl in (self.status_text, self.lbl_pubkey, self.lbl_port,
+                    self.lbl_addresses, self.lbl_dns, self.lbl_mtu):
             lbl.setFont(label_font)
             lbl.setProperty("class", "data-label")
             lbl.setWordWrap(False)
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            lbl.setMinimumHeight(28)
+            lbl.setMinimumHeight(ROW_HEIGHT)
 
+        # --- Add Rows to Interface Form ---
         for name, widget in [
-            ("Status:", status_container),
+            ("Status:", status_row),
             ("Public Key:", self.lbl_pubkey),
             ("Listen Port:", self.lbl_port),
             ("Addresses:", self.lbl_addresses),
-            ("DNS Servers:", self.lbl_dns)
+            ("MTU:", self.lbl_mtu),
+            ("DNS Servers:", self.lbl_dns),
         ]:
-# Interface labels  
             label = QLabel(name)
-            label.setFont(left_label_font) 
+            label.setFont(left_label_font)
             label.setMinimumWidth(130)
             label.setMaximumWidth(130)
+            label.setMinimumHeight(ROW_HEIGHT)
             label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            widget.setContentsMargins(20, 0, 0, 0)
-            intf_form.addRow(label, widget)
+            self.intf_form_layout.addRow(label, widget)
 
-# Toggle-style button using QPushButton
-        self.btnToggle = QPushButton("Activate")
+        # --- Activate/Deactivate Toggle Button with custom shadowed label ---
+        self.btnToggle = QPushButton()
+        self.btnToggle.setText("")  # Clear built-in text
+
+        # Create a QLabel inside the button for shadowed text
+        shadow_label = QLabel("<b>Activate</b>", self.btnToggle)
+        shadow_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # Apply drop shadow effect to the label
+        effect = QGraphicsDropShadowEffect()
+        effect.setBlurRadius(4)
+        effect.setOffset(0, 0)
+        effect.setColor(QColor(0, 0, 0, 160))
+        shadow_label.setGraphicsEffect(effect)
+
+        # Center the label within the button
+        btnToggleLayout = QHBoxLayout(self.btnToggle)
+        btnToggleLayout.setContentsMargins(0, 0, 0, 0)
+        btnToggleLayout.addWidget(shadow_label)
+
+        # Make the button checkable and wire up toggle state
         self.btnToggle.setCheckable(True)
         self.btnToggle.setChecked(False)
         self.btnToggle.toggled.connect(self.on_toggle_state)
-        self.btnToggle.setFixedWidth(90)
-        self.btnToggle.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.btnToggle.setStyleSheet(f"""
-            QPushButton {{
-                background-color: qlineargradient(
-                    spread:pad, x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(180, 255, 255, 255),
-                    stop:1 rgba(100, 200, 255, 255)
-                );
-                color: black;
-                border: 1px solid #3399cc;
-                border-radius: 6px;
-                padding: 42x 2px;
-                font-weight: bold;
-            }}
-            QPushButton:checked {{
-                background-color: qlineargradient(
-                    spread:pad, x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(150, 255, 150, 255),
-                    stop:1 rgba(60, 200, 120, 255)
-                );
-                color: black;
-                border: 1px solid #339966;
-            }}
-        """)
 
-# Apply drop shadow to the toggle button (pillbox and text)
+        # Restore original color styles on the button
+        self.btnToggle.setStyleSheet("""
+		QPushButton {
+		    /* use the widget’s own palette for a native grey look */
+		    background-color: palette(button);
+		    color: palette(button-text);
+		    border: 1px solid transparent;  /* preserves the shape */
+		    border-radius: 11px;
+		    padding: 2px 12px 3px 12px;
+		    min-width: 70px;
+		    max-width: 150px;
+		    min-height: 16px;
+		    max-height: 16px;
+		}
+		QPushButton:hover {
+		    background-color: palette(light);
+		}
+		QPushButton:checked {
+		    background: qlineargradient(
+		        x1:0, y1:0, x2:0, y2:1,
+		        /* 200/255 ≈ 78% opacity */
+		        stop:0 rgba(49,217,0,200),
+		        stop:1 rgba(1,150,1,200)
+		    );
+		    color:  #fff;
+		    border: 1px solid #218c4a;
+		}
+		        """)
 
-        toggle_shadow = QGraphicsDropShadowEffect()
-        toggle_shadow.setBlurRadius(8)
-        toggle_shadow.setOffset(1, 2)
-        toggle_shadow.setColor(QColor(0, 0, 0, 160))
-        self.btnToggle.setGraphicsEffect(toggle_shadow)
+        # Reapply drop shadow to the button widget
+        button_shadow = QGraphicsDropShadowEffect()
+        button_shadow.setBlurRadius(8)
+        button_shadow.setOffset(1, 2)
+        button_shadow.setColor(QColor(0, 0, 0, 160))
+        self.btnToggle.setGraphicsEffect(button_shadow)
 
-        intf_layout = QVBoxLayout()
-        intf_layout.addLayout(intf_form)
+        # Keep a reference for updating text later
+        self.btnToggleLabel = shadow_label
 
-# Corrected toggle button layout: align to right edge of value column
-# Use a horizontal layout, pad left to match label width + spacing
+        # Add the button to its parent layout
         toggle_btn_layout = QHBoxLayout()
-        toggle_btn_layout.setContentsMargins(130 + 40, 0, 0, 0)  # label width + spacing
+        toggle_btn_layout.setContentsMargins(170, 0, 0, 0)
         toggle_btn_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         toggle_btn_layout.addWidget(self.btnToggle)
 
+        intf_layout = QVBoxLayout()
+        intf_layout.addLayout(self.intf_form_layout)
         intf_layout.addLayout(toggle_btn_layout)
         self.intf_group.setLayout(intf_layout)
         self.intf_group.setMinimumHeight(220)
-
+        # --- Peer Group ---
         self.peer_group = QGroupBox("Peer:")
         peer_title_font = QFont()
         peer_title_font.setBold(True)
-        peer_title_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         self.peer_group.setFont(peer_title_font)
-        self.peer_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        peer_form = QFormLayout()
-        self.peer_form_layout = peer_form
+        self.peer_form_layout = QFormLayout()
+        self.peer_form_layout.setHorizontalSpacing(32)
+        self.peer_form_layout.setVerticalSpacing(8)
+        intf_layout.setContentsMargins(12, 12, 12, 12)
 
-        peer_form.setHorizontalSpacing(40)
-        peer_form.setVerticalSpacing(12)    # match interface section vertical spacing
-        peer_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        peer_form.setFormAlignment(Qt.AlignmentFlag.AlignTop)
-        peer_form.setSpacing(2)
-
+        self.peer_form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.peer_form_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        self.peer_form_layout.setSpacing(0)
         self.lbl_peer_key = QLabel()
         self.lbl_allowed_ips = QLabel()
         self.lbl_endpoint = QLabel()
         self.lbl_handshake = QLabel()
         self.lbl_transfer = QLabel()
-
-        for lbl in (self.lbl_peer_key, self.lbl_allowed_ips,
-                    self.lbl_endpoint, self.lbl_handshake, self.lbl_transfer):
+        self.lbl_preshared = QLabel()
+        for lbl in (self.lbl_peer_key, self.lbl_allowed_ips, self.lbl_endpoint,
+                    self.lbl_handshake, self.lbl_transfer, self.lbl_preshared):
             lbl.setFont(label_font)
             lbl.setProperty("class", "data-label")
             lbl.setWordWrap(False)
             lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            lbl.setMinimumHeight(28)
-
+            lbl.setMinimumHeight(18)
         for name, widget in [
             ("Public Key:", self.lbl_peer_key),
+            ("PreShared Key:", self.lbl_preshared),
             ("Allowed IPs:", self.lbl_allowed_ips),
             ("Endpoint:", self.lbl_endpoint),
             ("Last Handshake:", self.lbl_handshake),
-            ("Transfer:", self.lbl_transfer)
+            ("Transfer:", self.lbl_transfer),
         ]:
-
-# Peer labels        
             label = QLabel(name)
             label.setFont(left_label_font)
             label.setMinimumWidth(130)
@@ -500,200 +731,302 @@ class WGGui(QWidget):
             label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             widget.setContentsMargins(20, 0, 0, 0)
-            peer_form.addRow(label, widget)
-        self.peer_group.setLayout(peer_form)
+            self.peer_form_layout.addRow(label, widget)
+        self.peer_group.setLayout(self.peer_form_layout)
+        self.peer_group.layout().setContentsMargins(26, 26, 26, 26)
 
-        btn_box = QHBoxLayout()
+        # --- Action Buttons (Single Helper Setup) ---
+        def setup_btn(icon, tooltip, cb, width=30, use_custom_icon=False):
+            btn = QPushButton()
+            if use_custom_icon:
+                btn.setIcon(QIcon(icon))
+            else:
+                btn.setIcon(self.style().standardIcon(icon))
+            btn.setToolTip(tooltip)
+            btn.setFixedWidth(width)
+            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            btn.clicked.connect(cb)
+            return btn
 
-# Profile toggle button ("Connect")
-        self.btnProfileToggle = QPushButton("Connect")
-        self.btnProfileToggle.setCheckable(True)
-        self.btnProfileToggle.setChecked(False)
-        self.btnProfileToggle.setFixedWidth(90)
+        self.btnEdit = setup_btn(QStyle.StandardPixmap.SP_FileDialogContentsView, "Edit Profile", self.edit_selected_profile)
+        btnAdd = setup_btn(QStyle.StandardPixmap.SP_FileDialogNewFolder, "Add Profile", self.add_profile)
+        btnDelete = setup_btn(QStyle.StandardPixmap.SP_TrashIcon, "Delete Profile", self.delete_profile)
+        btnUpload = setup_btn(QStyle.StandardPixmap.SP_ArrowUp, "Upload Profile", self.upload_profile)
+        btnDownload = setup_btn(QStyle.StandardPixmap.SP_DialogSaveButton, "Download All Profiles", self.download_profiles)        
+        self.btnConnect = setup_btn(QStyle.StandardPixmap.SP_MediaPlay, "Connect", self.on_connect)
+        self.btnDisconnect = setup_btn(QStyle.StandardPixmap.SP_MediaStop, "Disconnect", self.on_disconnect)
+        red_x_icon_path = os.path.join(self.resource_dir, f"logout_{theme_suffix}.svg")        
+        self.btnQuit = setup_btn(red_x_icon_path, "Quit", lambda: QApplication.instance().quit(), use_custom_icon=True)
 
-        self.btnProfileToggle.toggled.connect(self.on_profile_toggle)
 
-        self.btnQuit = QPushButton("Quit")
-        self.btnQuit.setFixedWidth(90)
-        self.btnQuit.clicked.connect(self.quit_and_disconnect)
-
-        self.btnEdit = QPushButton("Edit")
-        self.btnEdit.setFixedWidth(90)
-        self.btnEdit.clicked.connect(self.edit_selected_profile)
-
-# Insert btnProfileToggle as the first widget, keep it in the same row as btnEdit and btnQuit
-        btn_box.addWidget(self.btnProfileToggle)
-        btn_box.addWidget(self.btnEdit)
-        btn_box.addWidget(self.btnQuit)
-
+        # --- Left Panel Layout ---
         left = QWidget()
-        self.list.setMinimumWidth(260)
-        self.list.setMaximumWidth(300)
+        left.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         left.setMinimumWidth(300)
         left.setMaximumWidth(300)
         left_layout = QVBoxLayout(left)
-        profiles_label = QLabel("Profiles")
-        profiles_label.setProperty("class", "section-title")
 
+        self.list_tab = QTabWidget()
+        self.list_tab.setTabPosition(QTabWidget.TabPosition.North)
+        self.list_tab.setDocumentMode(True)
+        self.list_tab.addTab(self.list, "Profiles")
+        # --- Optional Tools Tab ---
+        if ENABLE_TOOLS_TAB:
+            tools_tab = QWidget()
+            tools_layout = QVBoxLayout()
+            tools_layout.setContentsMargins(0, 0, 0, 0)
+            tools_layout.setSpacing(4)
+            tools_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            self.tools_output = QPlainTextEdit()
+            self.tools_output.setReadOnly(True)
+            self.tools_output.setPlaceholderText("Script output will appear here...")
+            self.tools_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self.tools_output.setContentsMargins(0, 0, 0, 0)
+            self.tools_output.setStyleSheet("""
+                QPlainTextEdit {
+                    background-color: #121212;
+                    color: #FFFFFF;
+                    border: 1px solid #333;
+                    border-radius: 2px;
+                    padding: 6px;
+                }
+            """)
+            font = QFont("Consolas, SF Mono, Menlo, monospace", 10)
+            font.setStyleHint(QFont.StyleHint.Monospace)
+            self.tools_output.setFont(font)
+            self.tools_output.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+            from PyQt6.QtGui import QTextOption
+            self.tools_output.setWordWrapMode(QTextOption.WrapMode.NoWrap)
+            tools_path = os.path.join(os.path.dirname(__file__), "tools")
+            if os.path.isdir(tools_path):
+                script_paths = sorted(glob.glob(os.path.join(tools_path, "*.sh")) + glob.glob(os.path.join(tools_path, "*.py")))
+                if not script_paths:
+                    label = QLabel("No .sh or .py scripts found in tools/ directory.")
+                    tools_layout.addWidget(label)
+                else:
+                    # --- Place grid inside a group box for border/box effect
+                    btn_box = QGroupBox("")
+                    btn_box.setStyleSheet("""
+                        QGroupBox {
+                            border: 1px solid #555;
+                            border-radius: 6px;
+                            margin-top: 2px;
+                            background: #1a1a1a;
+                        }
+                    """)
+                    btn_grid = QGridLayout()
+                    btn_grid.setHorizontalSpacing(2)
+                    btn_grid.setVerticalSpacing(2)
+                    btn_grid.setContentsMargins(4, 4, 4, 4)
+                    col_count = 2  # two columns
+                    for i, script_path in enumerate(script_paths):
+                        script_name = os.path.basename(script_path)
+                        btn = QPushButton(f"{script_name}")
+                        btn.setStyleSheet("""
+                            QPushButton {
+                                background-color: #232323;
+                                color: #eee;
+                                border: 1px solid #444;
+                                border-radius: 3px;
+                                padding: 1px 6px 1px 6px;
+                                font-weight: normal;
+                                font-size: 10px;
+                                min-width: 70px;
+                                min-height: 18px;
+                            }
+                            QPushButton:hover {
+                                background-color: #333;
+                            }
+                            QPushButton:pressed {
+                                background-color: #151515;
+                            }
+                        """)
+                        btn.clicked.connect(lambda _, s=script_path: self.run_tool_script(s))
+                        row = i // col_count
+                        col = i % col_count
+                        btn_grid.addWidget(btn, row, col)
+                    btn_box.setLayout(btn_grid)
+                    tools_layout.addWidget(btn_box)
+            else:
+                label = QLabel("tools/ directory not found. Create it to add custom scripts.")
+                tools_layout.addWidget(label)
+            tools_layout.addWidget(self.tools_output)
+            tools_tab.setLayout(tools_layout)
+            tools_tab.setContentsMargins(0, 0, 0, 0)
+            self.list_tab.addTab(tools_tab, "Tools")
+            # --- Active Connections Tab ---
+            active_tab = QWidget()
+            active_layout = QVBoxLayout(active_tab)
+            self.active_tab_list = QListWidget()
+            self.active_tab_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            active_layout.setContentsMargins(0, 0, 0, 0)
+            active_layout.setSpacing(0)
+            self.active_tab_list.setStyleSheet("""
+                QListWidget {
+                    border: 1px solid #444;
+                    border-radius: 1px;
+                    padding: 8px;
+                }
+                QListWidget::item {
+                    margin-bottom: 4px;
+                }
+            """)
+            self.active_tab_list.setContentsMargins(8, 8, 8, 8)
+            # connect signals
+            self.active_tab_list.currentItemChanged.connect(self.on_active_selected)
+            self.active_tab_list.itemDoubleClicked.connect(self.on_profile_double_clicked)
+            active_layout.addWidget(self.active_tab_list)
+            self.list_tab.addTab(active_tab, "Active")
+        self.list.setStyleSheet("""
+        QListWidget {
+            border: 1px solid #444;
+            border-radius: 1px;
+            padding: 8px;
+        }
+        QListWidget::item {
+            margin-bottom: 4px;
+        }
+        """)
 
-# "Profiles" header label
-        profiles_font = QFont()
-        profiles_font.setBold(True)
-        profiles_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-        profiles_label.setFont(profiles_font)
+        left_layout.addWidget(self.list_tab, stretch=1)
 
-# Insert profiles_header_layout here
+        # --- Unified Button Bar in QGroupBox (native, no title, no stylesheet) ---
+        button_bar_group = QGroupBox("")
+        # No styleSheet is set on button_bar_group; native, unstyled group box.
+        button_bar_layout = QHBoxLayout(button_bar_group)
+        button_bar_layout.setContentsMargins(8, 4, 8, 4)
+        button_bar_layout.setSpacing(8)
+        button_bar_layout.addWidget(self.btnEdit)
+        button_bar_layout.addWidget(btnAdd)
+        button_bar_layout.addWidget(btnDelete)
+        button_bar_layout.addWidget(btnUpload)
+        button_bar_layout.addWidget(btnDownload)
+        button_bar_layout.addStretch(1)
+        button_bar_layout.addWidget(self.btnConnect)
+        button_bar_layout.addWidget(self.btnDisconnect)
+        button_bar_layout.addWidget(self.btnQuit)
 
-        profiles_header_layout = QHBoxLayout()
-        profiles_header_layout.addWidget(profiles_label)
-        profiles_header_layout.addStretch()
+        left_layout.addWidget(button_bar_group)
 
- # --- Profile Management Buttons ---
+        self.list.setContentsMargins(8, 8, 8, 8)      # <--- Padding inside list
+        left_layout.setContentsMargins(0, 0, 4, 0)    # <--- Padding around left panel
+        left_layout.setSpacing(8)
 
-        btnAdd = QPushButton()
-        btnAdd.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogNewFolder))
-        btnAdd.setToolTip("Add Profile")
-        btnAdd.clicked.connect(self.add_profile)
-
-        btnDelete = QPushButton()
-        btnDelete.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TrashIcon))
-        btnDelete.setToolTip("Delete Profile")
-        btnDelete.clicked.connect(self.delete_profile)
-
-        btnUpload = QPushButton()
-        btnUpload.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
-        btnUpload.setToolTip("Upload Profile")
-        btnUpload.clicked.connect(self.upload_profile)
-
-        btnDownload = QPushButton()
-        btnDownload.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton))
-        btnDownload.setToolTip("Download All Profiles")
-        btnDownload.clicked.connect(self.download_profiles)
-
-        for btn in (btnAdd, btnDelete, btnUpload, btnDownload):
-            btn.setFixedWidth(30)
-            btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-            profiles_header_layout.addWidget(btn)
-
-        left_layout.addLayout(profiles_header_layout)
-        
-# Add top margin spacer to align Interface group with Profiles header
-        left_layout.addSpacing(12)
-
-# left_layout.addWidget(profiles_label)  # Removed to avoid adding the label twice
-        left_layout.addWidget(self.list)
-        left_layout.addLayout(btn_box)
-
+        # --- Right Panel Layout ---
         right = QWidget()
         right.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        right.setMinimumWidth(550)
+        # right.setMaximumWidth(900)  # <-- REMOVED maximum width restriction
         right_layout = QVBoxLayout(right)
-        right_layout.setSpacing(12)
+        right_layout.setSpacing(4)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self.intf_group)
-        right_layout.addWidget(self.peer_group)
-        right_layout.addStretch()
+        right_layout.addWidget(self.intf_group, 1)
+        right_layout.addWidget(self.peer_group, 1)
+
+        # Set minimum width for group boxes:
+        self.intf_group.setMinimumWidth(500)
+        self.peer_group.setMinimumWidth(500)
+        # --- Match Groupbox Widths ---
         def match_groupbox_widths():
-            intf_form = self.intf_form_layout
-            peer_form = self.peer_form_layout
-            all_forms = [intf_form, peer_form]
-
-# Collect label widgets
-            label_widgets = []
-            for form in all_forms:
-                for i in range(form.rowCount()):
-                    item = form.itemAt(i, QFormLayout.ItemRole.LabelRole)
-                    if item:
-                        label_widgets.append(item.widget())
-
-# Determine the widest label
+            all_forms = [self.intf_form_layout, self.peer_form_layout]
+            label_widgets = [form.itemAt(i, QFormLayout.ItemRole.LabelRole).widget()
+                             for form in all_forms for i in range(form.rowCount()) if form.itemAt(i, QFormLayout.ItemRole.LabelRole)]
             label_w = max((label.sizeHint().width() for label in label_widgets if label), default=110)
-
-# Apply width to all labels
+            label_w = max(label_w, 130)  # Never shrink below 130
             for label in label_widgets:
                 if label:
                     label.setMinimumWidth(label_w)
                     label.setMaximumWidth(label_w)
                     label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-
-# Optional: ensure groupboxes align
-            widest = max(self.intf_group.sizeHint().width(), self.peer_group.sizeHint().width(), 520)
+            widest = max(self.intf_group.sizeHint().width(), self.peer_group.sizeHint().width(), 500)
             self.intf_group.setMinimumWidth(widest)
             self.peer_group.setMinimumWidth(widest)
         match_groupbox_widths()
-
+        # --- Splitter ---
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setMinimumHeight(400)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(10)
         splitter.addWidget(left)
         splitter.addWidget(right)
-        splitter.setStyleSheet("""
-            QSplitter::handle {
-                background: transparent;
-                width: 1px;
-            }
-        """)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setChildrenCollapsible(False)
-        splitter.setHandleWidth(2)
+        splitter.setSizes([300, 600])
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        splitter.setStyleSheet("QSplitter::handle { background: transparent; width: 10px; }")
 
-        self.log = QTextEdit(readOnly=True)
+        splitter.setMinimumHeight(500)  # Try 400, 500, 600; adjust until it matches your desired min
+        splitter.setMaximumHeight(500)
+        self.intf_group.setMinimumHeight(200)  # Adjust if needed
+        self.peer_group.setMinimumHeight(200)  # Adjust if needed
 
+
+        # --- Logs and Multi List Tabs ---
+        self.log = LogTextEdit(readOnly=True)
+        mono = QFont("Consolas")
+        if not mono.exactMatch():
+            mono = QFont("Monospace")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        self.log.setFont(mono)
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(8, 8, 8, 8)
-        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(18)
         main_layout.addWidget(splitter)
-        logs_label = QLabel("Logs")
-
-        logs_label.setProperty("class", "section-title")
-
-# Log font
-        logs_font = QFont()
-        logs_font.setBold(True)
-        logs_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-        logs_label.setFont(logs_font)
-        main_layout.addWidget(logs_label)
-        main_layout.addWidget(self.log)
-        
-
-# self.btnConnect.clicked.connect(self.on_connect)
-# self.btnDisconnect.clicked.connect(self.on_disconnect)
-# self.btnQuit.clicked.connect(self.quit_and_disconnect)
-
+        tabs = QTabWidget()
+        tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        logs_tab = QWidget()
+        logs_layout = QVBoxLayout(logs_tab)
+        logs_layout.setContentsMargins(8, 8, 8, 8)
+        logs_layout.addWidget(self.log)
+        tabs.addTab(logs_tab, "Logs")
+        list_tab = QWidget()
+        list_layout = QVBoxLayout(list_tab)
+        list_layout.setContentsMargins(8, 8, 8, 8)
+        self.multi_list = QTextEdit(readOnly=True)
+        self.multi_list.setFont(mono)
+        list_layout.addWidget(self.multi_list)
+        tabs.addTab(list_tab, "WG-Multi List")
+        main_layout.addWidget(tabs)
+        # --- Process and Timer ---
         self.process = QProcess(self)
         self.process.readyReadStandardOutput.connect(self.on_stdout)
         self.process.readyReadStandardError.connect(self.on_stderr)
         self.process.finished.connect(self.run_next)
-
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_status)
         self.timer.start(REFRESH_INTERVAL)
-
-        self.active_profile = None
         self.commands = []
         self.cmd_index = 0
-
         self.load_profiles()
         QTimer.singleShot(100, self.refresh_status)
-
-
+        self.update_multi_list()
+        # --- Update Active Connections Tab ---
+        if hasattr(self, 'active_tab_list'):
+            self.active_tab_list.clear()
+            for i in range(self.list.count()):
+                prof = self.list.item(i).data(Qt.ItemDataRole.UserRole)
+                iface = get_utun_for_profile(prof)
+                if iface:
+                    display_text = f"{iface}: {prof}"
+                    item = QListWidgetItem(display_text)
+                    item.setData(Qt.ItemDataRole.UserRole, prof)
+                    self.active_tab_list.addItem(item)
+        self.log.viewport().installEventFilter(self)
+    # --- Tray, Window, and Utility Methods ---
     def on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             if self.isVisible():
                 self.hide()
             else:
                 self.show_and_raise()
-
     def show_and_raise(self):
         self.showNormal()
         self.raise_()
         self.activateWindow()
-
     def quit_and_disconnect(self):
         self.quitting = True
-        if self.is_interface_up():
-            self.on_disconnect()
+        self.on_disconnect_all()
         QApplication.instance().quit()
-
     def closeEvent(self, event):
         if self.quitting:
             event.accept()
@@ -706,14 +1039,18 @@ class WGGui(QWidget):
                 5000
             )
             event.ignore()
-
     def update_tray_icon(self):
-        if self.interface_up:
-            self.tray_icon.setIcon(QIcon(self.icon_connected_path))
-        else:
-            self.tray_icon.setIcon(QIcon(self.icon_disconnected_path))
-
-    
+        any_active = any(self.is_interface_up(self.list.item(i).data(Qt.ItemDataRole.UserRole))
+                         for i in range(self.list.count()))
+        icon_path = self.icon_connected_path if any_active else self.icon_disconnected_path
+        self.tray_icon.setIcon(QIcon(icon_path))
+    def is_interface_up(self, prof=None):
+        prof = prof or self.active_profile
+        if not prof:
+            return False
+        iface = get_utun_for_profile(prof)
+        return iface if iface else False
+    # --- Profile Management and Status ---
     def load_profiles(self):
         self.list.clear()
         for conf in sorted(os.listdir(WG_DIR)):
@@ -725,72 +1062,99 @@ class WGGui(QWidget):
                 font.setBold(False)
                 font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
                 item.setFont(font)
+                item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
                 self.list.addItem(item)
-
     def refresh_status(self):
-        up = self.is_interface_up()
-        self.interface_up = up
         for i in range(self.list.count()):
             itm = self.list.item(i)
             prof = itm.data(Qt.ItemDataRole.UserRole)
+            utun_iface = self.is_interface_up(prof)
+            if utun_iface and is_low_utun(utun_iface):
+                self.log.append(f"⚠ WARNING: Profile '{prof}' is using a low-number utun interface ({utun_iface}).\n")
             font = QFont()
-            font.setBold(up and prof == self.active_profile)
+            font.setBold(bool(utun_iface))
             font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
-            
-# Draw a clean circle with fully transparent background
             size = 10
             pixmap = QPixmap(size, size)
             pixmap.fill(Qt.GlobalColor.transparent)
-
             painter = QPainter(pixmap)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             painter.setPen(Qt.PenStyle.NoPen)
-
-# use a soft gray when not active, green when active
-            color = QColor('#60FF60') if (up and prof == self.active_profile) else QColor('#888888')
+            color = QColor('#60FF60') if utun_iface else QColor('#888888')
             painter.setBrush(color)
-
-# Inset a bit to prevent edge artifacts
             painter.drawEllipse(1, 1, size - 2, size - 2)
             painter.end()
             itm.setIcon(QIcon(pixmap))
-
             itm.setFont(font)
             itm.setText(prof)
+        # --- Update Active Connections Tab ---
+        if hasattr(self, 'active_tab_list'):
+            self.active_tab_list.clear()
+            for i in range(self.list.count()):
+                prof = self.list.item(i).data(Qt.ItemDataRole.UserRole)
+                iface = get_utun_for_profile(prof)
+                if not iface:
+                    continue
+                display_text = f"{iface}: {prof}"
+                item = QListWidgetItem(display_text)
+                size = 10
+                pixmap = QPixmap(size, size)
+                pixmap.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pixmap)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QColor('#60FF60'))
+                painter.drawEllipse(1, 1, size-2, size-2)
+                painter.end()
+                item.setIcon(QIcon(pixmap))
+                item.setData(Qt.ItemDataRole.UserRole, prof)
+                self.active_tab_list.addItem(item)
+        current = self.list.currentItem()
+        self.interface_up = bool(self.is_interface_up(current.data(Qt.ItemDataRole.UserRole)) if current else False)
         self.update_detail_panel()
-        # Force re-evaluation of the status dot and text
-        self.update_detail_panel()
-        
-# Tray icon connected
         self.update_tray_icon()
-        
-# Update tray menu icons for theme
-        self.update_tray_menu_icons()
-    def update_tray_menu_icons(self):
-        """Update tray menu icons based on current theme."""
-        theme_suffix = "dark" if is_dark_mode() else "light"
-        self.act_show.setIcon(QIcon(os.path.join(self.resource_dir, f"eye_{theme_suffix}.svg")))
-        self.act_disconnect.setIcon(QIcon(os.path.join(self.resource_dir, f"plug-off_{theme_suffix}.svg")))
-        self.act_quit.setIcon(QIcon(os.path.join(self.resource_dir, f"logout_{theme_suffix}.svg")))
+        any_active = any(self.is_interface_up(self.list.item(i).data(Qt.ItemDataRole.UserRole)) for i in range(self.list.count()))
+        self.btnDisconnect.setEnabled(any_active)
+        self.btnDisconnect.setDefault(any_active)
+        self.btnDisconnect.setAutoDefault(any_active)
+        self.update_multi_list()
+    def update_multi_list(self):
+        # Asynchronously fetch the wg-multi list so the UI doesn’t block
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        proc.finished.connect(lambda code, status: self.handle_multi_list_finished(proc))
+        proc.start(PRIV_ESC, [WG_MULTI_SCRIPT, "list"])
 
-    def is_interface_up(self):
+    def handle_multi_list_finished(self, proc: QProcess):
+        """Called when ‘wg-multi list’ completes—refresh the text view."""
         try:
-            result = subprocess.run(
-                ["doas", "wg", "show", SYSTEM_IFACE],
-                capture_output=True, text=True
-            )
-            return f"interface: {SYSTEM_IFACE}" in result.stdout
-        except Exception:
-            return False
+            raw = proc.readAllStandardOutput().data().decode()
+        except Exception as e:
+            self.append_log(f"⚠ Error reading WG-Multi output: {e}\n")
+            return
 
+        # Display raw output in the text widget
+        self.multi_list.clear()
+        self.multi_list.setPlainText(raw)
     def update_detail_panel(self):
-        show_profile = self.active_profile if self.is_interface_up() and self.active_profile else None
-        if not show_profile:
-            item = self.list.currentItem()
-            show_profile = item.data(Qt.ItemDataRole.UserRole) if item else None
+        item = self.list.currentItem()
+        show_profile = item.data(Qt.ItemDataRole.UserRole) if item else None
+        utun_iface = self.is_interface_up(show_profile)
+        show_iface = utun_iface or "-"
+        self.intf_group.setTitle(f"Interface: {show_iface} / Profile: {show_profile or '-'}")
+        self.btnDisconnect.setEnabled(bool(utun_iface))
+        #self.btnToggle.setChecked(bool(utun_iface))
+        #self.btnToggleLabel.setText("Deactivate" if utun_iface else "Activate")
+        # block the toggled signal so we don't accidentally call on_disconnect()
+        self.btnToggle.blockSignals(True)
+        self.btnToggle.setChecked(bool(utun_iface))
+        self.btnToggle.blockSignals(False)
+        self.btnToggleLabel.setText("Deactivate" if utun_iface else "Activate")
+        
+        if utun_iface and is_low_utun(utun_iface):
+            self.log.append(f"⚠ WARNING: Selected profile is using {utun_iface} (reserved for macOS system use).")
         self.status_dot.clear()
         self.status_text.clear()
-        self.intf_group.setTitle(f"Interface: {show_profile}")
         self.lbl_pubkey.setText("-")
         self.lbl_port.setText("-")
         self.lbl_addresses.setText("-")
@@ -800,6 +1164,8 @@ class WGGui(QWidget):
         self.lbl_endpoint.setText("-")
         self.lbl_handshake.setText("-")
         self.lbl_transfer.setText("-")
+        self.lbl_mtu.setText("-")
+        self.lbl_preshared.setText("-")
         if not show_profile:
             return
         conf_path = os.path.join(WG_DIR, f"{show_profile}.conf")
@@ -811,317 +1177,263 @@ class WGGui(QWidget):
             self.lbl_peer_key.setText(peer_conf.get('pubkey', "-"))
             self.lbl_allowed_ips.setText(peer_conf.get('allowed_ips', "-"))
             self.lbl_endpoint.setText(peer_conf.get('endpoint', "-"))
+            self.lbl_mtu.setText(iface_conf.get('mtu', "-"))
+            self.lbl_preshared.setText(peer_conf.get('preshared_key', "-"))
             conf_port = iface_conf.get('port', "-")
             self.lbl_port.setText(conf_port)
-        if self.is_interface_up() and show_profile == self.active_profile:
-            iface, peer = self.parse_wg_show()
-            
-# Add green circle next to "Up"
-            pix = QPixmap(12, 12)
-            pix.fill(Qt.GlobalColor.transparent)
-            p = QPainter(pix)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setBrush(QColor('#60FF60'))
-            p.setPen(Qt.GlobalColor.transparent)
-            p.drawEllipse(0, 0, 12, 12)
-            p.end()
-            self.status_dot.setPixmap(pix)
-            self.status_text.setText("Up")
-            self.status_text.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
-            self.status_dot.setFixedSize(12, 12)
-            self.lbl_pubkey.setText(iface.get('pubkey', "-"))
-            self.lbl_port.setText(iface.get('port') or conf_port or "-")
-            self.lbl_handshake.setText(peer.get('handshake', "-"))
-            self.lbl_transfer.setText(peer.get('transfer', "-"))
+            hide_empty_rows(self.intf_form_layout, iface_conf, {"Status", "Public Key", "Listen Port", "Addresses", "DNS Servers"})
+            hide_empty_rows(self.peer_form_layout, peer_conf, {"Public Key", "Allowed IPs", "Endpoint", "Last Handshake", "Transfer"})
+        # --- Interface Status Dot: Aqua-Style ---
+        DOT_SIZE = 12
+        DOT_GREEN = "#019601"
+        DOT_RED = "#B80404"
+        DOT_GRAY = '#AAAAAA'
+        pix = QPixmap(DOT_SIZE, DOT_SIZE)
+        pix.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Choose main color
+        if utun_iface:
+            base = QColor(DOT_GREEN)
+        elif self.active_profile:
+            base = QColor(DOT_RED)
         else:
+            base = QColor(DOT_GRAY)
 
-# Always set dot to a fixed 12x12 transparent pixmap with red fill
-            pix = QPixmap(12, 12)
-            pix.fill(Qt.GlobalColor.transparent)
-            p = QPainter(pix)
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setBrush(QColor('#FF5050') if self.active_profile else QColor('#AAAAAA'))
-            p.setPen(Qt.GlobalColor.transparent)
-            p.drawEllipse(0, 0, 12, 12)
-            p.end()
-            self.status_dot.setPixmap(pix)
-            self.status_dot.setFixedSize(12, 12)
+        # Aqua: draw a radial gradient for glassy effect
+        grad = QRadialGradient(DOT_SIZE/2, DOT_SIZE/2, DOT_SIZE/2, DOT_SIZE/3, DOT_SIZE/3)
+        grad.setColorAt(0.0, QColor(255, 255, 255, 190))    # inner highlight
+        grad.setColorAt(0.6, base.lighter(110))
+        grad.setColorAt(1.0, base.darker(130))
+        p.setBrush(grad)
+        p.setPen(Qt.GlobalColor.transparent)
+        p.drawEllipse(0, 0, DOT_SIZE, DOT_SIZE)
 
-# Set status text
-            self.status_text.setText("Down" if self.active_profile else "")
-            self.status_text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            self.status_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        # Draw a subtle white reflection spot
+        p.setBrush(QColor(255,255,255,120))
+        p.setPen(Qt.GlobalColor.transparent)
+        spot = QRectF(DOT_SIZE*0.18, DOT_SIZE*0.16, DOT_SIZE*0.48, DOT_SIZE*0.28)
+        p.drawEllipse(spot)
+        p.end()
 
+        self.status_dot.setPixmap(pix)
+        self.status_dot.setFixedSize(DOT_SIZE, DOT_SIZE)
+        self.status_dot.setMinimumSize(DOT_SIZE, DOT_SIZE)
+        self.status_text.setText("Up" if utun_iface else ("Down" if self.active_profile else ""))
+        self.status_text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self.status_text.setMinimumHeight(ROW_HEIGHT)
+        self.status_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
-
+        if utun_iface:
+            try:
+                out = subprocess.check_output([PRIV_ESC, 'wg', 'show', utun_iface]).decode()
+                iface, peer = {}, {}
+                for line in out.splitlines():
+                    line = line.strip()
+                    if line.lower().startswith("interface:"):
+                        iface['name'] = line.split(":", 1)[1].strip()
+                    elif line.startswith("public key:"):
+                        iface['pubkey'] = line.split(":", 1)[1].strip()
+                    elif line.startswith("listening port:"):
+                        iface['port'] = line.split(":", 1)[1].strip()
+                    elif line.startswith("peer:"):
+                        peer['pubkey'] = line.split(":", 1)[1].strip()
+                    elif line.startswith("endpoint:"):
+                        peer['endpoint'] = line.split(":", 1)[1].strip()
+                    elif line.startswith("allowed ips:"):
+                        peer['allowed_ips'] = line.split(":", 1)[1].strip()
+                    elif line.startswith("latest handshake:"):
+                        peer['handshake'] = line.split(":", 1)[1].strip()
+                    elif line.startswith("transfer:"):
+                        peer['transfer'] = line.split(":", 1)[1].strip()
+                self.lbl_pubkey.setText(iface.get('pubkey', "-"))
+                self.lbl_port.setText(iface.get('port', conf_port) or "-")
+                self.lbl_handshake.setText(peer.get('handshake', "-"))
+                self.lbl_transfer.setText(peer.get('transfer', "-"))
+            except Exception:
+                pass
+        self.interface_up = bool(utun_iface)
+        self.update_tray_icon()
+    # --- Connect, Disconnect, and Toggle Logic ---
     def on_connect(self):
         itm = self.list.currentItem()
         if not itm:
             self.log.append("⚠ Select a profile first.\n")
             return
         prof = itm.data(Qt.ItemDataRole.UserRole)
+        iface_up = self.is_interface_up(prof)
+        if iface_up:
+            if is_low_utun(iface_up):
+                self.log.append(
+                    f"[!] Refusing to use reserved utun device {iface_up} "
+                    f"for '{prof}'. Try cleaning up or rebooting."
+                )
+                return
+            self.log.append(f"⚠ Profile '{prof}' already active (utun: {iface_up}).\n")
+            return
+
+        conf_path = os.path.join(WG_DIR, f"{prof}.conf")
+        with open(conf_path) as f:
+            is_full = "0.0.0.0/0" in f.read()
+        if is_full:
+            self.tear_down_full_tunnels(prof)
+
         self.active_profile = prof
-        src = os.path.join(WG_DIR, f"{prof}.conf")
+        self.pending_connect_profile = prof
 
-        # Kill any previous route_monitor.sh processes for wg0
-        subprocess.run('pkill -f "route_monitor.sh start wg0"', shell=True)
-        cmds = []
+        # Log exactly what file is being passed
+        self.log.append(f"▶ Bringing up profile: {prof}.conf")
+        # Start the QProcess
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self.on_stdout)
+        self.process.readyReadStandardError.connect(self.on_stderr)
+        self.process.finished.connect(self.on_connect_finished)
+        self.process.start(PRIV_ESC, [WG_MULTI_SCRIPT, 'up', f"{prof}.conf"])
 
-        # Always use wg0 by copying the selected profile to the system path
-        cmds.append(["doas", "cp", src, SYSTEM_CONF])
+    def on_connect_finished(self):
+        prof = getattr(self, "pending_connect_profile", None)
+        if self.process.exitCode() != 0:
+            self.append_log(f"[!] Failed to bring up interface for profile: {prof}\nReturn code: {self.process.exitCode()}\n")
+            self.active_profile = None
+        else:
+            conf_path = os.path.join(WG_DIR, f"{prof}.conf")
+            iface_conf, peer_conf = parse_wg_conf(conf_path)
+            QTimer.singleShot(2000, lambda: self.after_connect_tasks(prof, iface_conf, peer_conf))
+            self.btnToggle.setChecked(True)
+            self.btnToggleLabel.setText("Deactivate")
+        self.refresh_status()
 
-        # Defensive cleanup before bringing up wg0
-        cmds.append(["doas", WG_QUICK, "down", SYSTEM_IFACE])
-        cmds.append(["doas", "ifconfig", SYSTEM_IFACE, "destroy"])
-        cmds.append(["sleep", "0.5"])
-
-        # Bring interface up fresh
-        cmds.append(["doas", WG_QUICK, "up", SYSTEM_IFACE])
-
-        # Sanity check: ensure interface is up
-        def _sanity_check_iface(log, iface):
-            result = subprocess.run(["ifconfig", iface], capture_output=True, text=True)
-            if iface not in result.stdout:
-                log.append(f"[!] Interface {iface} not present after wg-quick up — retrying...\n")
-                # Optional: implement retry logic if needed
-        # We'll call this after the run_next finishes all commands
-
-        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-        POSTUP_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "global_postup.sh")
-        cmds.append([POSTUP_SCRIPT, SYSTEM_IFACE])
-        with open(src) as f:
-            for ln in f:
-                if ln.startswith("#ping "):
-                    parts = ln.strip().split()
-                    if len(parts) >= 2:
-                        ip = parts[1]
-                        cmds.append(["ping", "-c", PING_COUNT, ip])
-
-        self.commands, self.cmd_index = cmds, 0
-        self.log.clear()
-        self.log.setPlainText("")  # Ensure QTextEdit is flushed clean
-        self.run_next()
-        self.update_tray_icon()
-
-# After bringing up, run the sanity check (after all commands finish)
-        QTimer.singleShot(2000, lambda: _sanity_check_iface(self.log, SYSTEM_IFACE))
-
-# Update toggle button state and text (moved after run_next and update_tray_icon for UI sync)
+    def after_connect_tasks(self, prof, iface_conf, peer_conf):
+        # Perform post-connection ping(s) if requested by the config
+        ping_targets = []
+        if 'ping' in peer_conf:
+            ping_targets.append(peer_conf['ping'])
+        if 'addresses' in iface_conf:
+            ping_targets.extend(addr.split('/')[0] for addr in iface_conf['addresses'])
+        for ip in ping_targets:
+            self.log.append(f"🔍 Pinging {ip} (background)...")
+            QTimer.singleShot(100, lambda ip=ip: self.run_ping(ip))
         self.btnToggle.setChecked(True)
-        self.btnToggle.style().unpolish(self.btnToggle)
-        self.btnToggle.style().polish(self.btnToggle)
-        self.btnToggle.update()
-        self.btnToggle.setText("Deactivate")  # Ensure this is last
+        self.btnToggleLabel.setText("Deactivate")
+        self.refresh_status()
 
-# --- Synchronize secondary toggle button ---
-        self.btnProfileToggle.setChecked(True)
-        self.btnProfileToggle.setText("Disconnect")
-        print("DEBUG: btnToggle text set to:", self.btnToggle.text(), file=sys.stderr)
+    def run_ping(self, ip):
+        try:
+            proc = QProcess(self)
+            proc.readyReadStandardOutput.connect(
+                lambda: self.append_log(proc.readAllStandardOutput().data().decode().rstrip("\n")))
+            proc.readyReadStandardError.connect(
+                lambda: self.append_log(proc.readAllStandardError().data().decode().rstrip("\n")))
+            proc.start("ping", ["-c", "3", ip])
+        except Exception as e:
+            self.log.append(f"⚠ Exception while running ping for {ip}: {e}")
 
     def on_disconnect(self):
-        if not self.is_interface_up():
-            self.append_log("Interface is already down.")
-            # Clean up button states to avoid mismatch
-            self.btnToggle.setChecked(False)
-            self.btnToggle.setText("Activate")
-            self.btnProfileToggle.setChecked(False)
-            self.btnProfileToggle.setText("Connect")
-            return
-
-        self.append_log("🔻 Disconnecting interface and flushing routes...")
-
-        cmds = []
-        cmds.append(["doas", WG_QUICK, "down", SYSTEM_IFACE])
-        cmds.append(["doas", "ifconfig", SYSTEM_IFACE, "destroy"])
-        SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-        POSTDOWN_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "global_postdown.sh")
-        cmds.append([POSTDOWN_SCRIPT, SYSTEM_IFACE])
-
-        self.commands = cmds
-        self.cmd_index = 0
-        self.run_next()
-        # Ensure proper sync of toggle button states after disconnect
-        self.btnToggle.setChecked(False)
-        self.btnToggle.setText("Activate")
-        self.btnProfileToggle.setChecked(False)
-        self.btnProfileToggle.setText("Connect")
-
-    def handle_down_output(self):
-        output = bytes(self.down_process.readAllStandardOutput()).decode("utf-8")
-        if output:
-            self.append_log(output)
-        error_output = bytes(self.down_process.readAllStandardError()).decode("utf-8")
-        if error_output:
-            self.append_log(error_output)
-
-    def handle_down_finished(self):
-        # Destroy the interface if it still exists
-        subprocess.run(["doas", "ifconfig", SYSTEM_IFACE, "destroy"], stderr=subprocess.DEVNULL)
-        self.append_log("[DEBUG] wg-quick down finished.")
-        self.toggle_state = False
-        self.update_toggle_button()
-        self.tray_icon.setIcon(QIcon(self.icon_disconnected_path))
-        self.btnToggle.setText("Activate")
-        self.btnToggle.setChecked(False)
-        if hasattr(self, "status_label"):
-            self.status_label.setText("Interface: Disconnected")
-
-    def append_log(self, text):
-        self.log.moveCursor(QTextCursor.MoveOperation.End)
-        self.log.insertPlainText(text if text.endswith("\n") else text + "\n")
-        self.log.moveCursor(QTextCursor.MoveOperation.End)
-
-    def update_toggle_button(self):
-        # Synchronize toggle button state and text
-        self.btnToggle.setChecked(False)
-        self.btnToggle.setText("Activate")
-        self.btnProfileToggle.setChecked(False)
-        self.btnProfileToggle.setText("Connect")
-
-    def on_toggle(self):
-        if self.is_interface_up():
-            self.on_disconnect()
-        else:
-            self.on_connect()
-
-    def on_toggle_state(self, checked):
-        print("DEBUG: toggle_state changed to", checked, file=sys.stderr)
-        if checked:
-            self.on_connect()
-        else:
-            self.on_disconnect()
-
-    def on_profile_toggle(self, checked):
-        print("DEBUG: profile_toggle changed to", checked, file=sys.stderr)
+        # Try to disconnect the currently selected or active profile
         itm = self.list.currentItem()
-        if not itm:
-            self.log.append("⚠ Select a profile first.\n")
+        prof = itm.data(Qt.ItemDataRole.UserRole) if itm else self.active_profile
+        if not prof:
+            self.append_log("⚠ Select a profile to disconnect.\n")
             return
-        prof = itm.data(Qt.ItemDataRole.UserRole)
+        if not os.path.exists(WG_MULTI_SCRIPT):
+            self.append_log(f"[!] WireGuard multi-script not found at {WG_MULTI_SCRIPT}")
+            return
+
         self.active_profile = prof
-        src = os.path.join(WG_DIR, f"{prof}.conf")
-        if checked:
-            # Connect logic with robust down/up/retry
-            # Kill any previous route_monitor.sh processes for wg0
-            subprocess.run('pkill -f "route_monitor.sh start wg0"', shell=True)
-            cmds = []
-            # Always use wg0 by copying the selected profile to the system path
-            cmds.append(["doas", "cp", src, SYSTEM_CONF])
-            # Defensive cleanup before bringing up wg0
-            if self.is_interface_up():
-                cmds.append(["doas", WG_QUICK, "down", SYSTEM_IFACE])
-                cmds.append(["sleep", "1"])
-                cmds.append(["doas", "ifconfig", SYSTEM_IFACE, "destroy"])
-            else:
-                self.log.append("> Interface is already down.")
-            # Add wg-quick up and retry if interface not present
-            cmds.append(["doas", WG_QUICK, "up", SYSTEM_IFACE])
-            cmds.append(["sleep", "0.5"])
-            cmds.append(["/bin/sh", "-c", f"! ifconfig {SYSTEM_IFACE} > /dev/null 2>&1 && echo '[!] Interface {SYSTEM_IFACE} not present after wg-quick up — retrying...'"])
-            cmds.append(["doas", WG_QUICK, "up", SYSTEM_IFACE])
-            SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-            POSTUP_SCRIPT = os.path.join(SCRIPT_DIR, "scripts", "global_postup.sh")
-            cmds.append([POSTUP_SCRIPT, SYSTEM_IFACE])
-            with open(src) as f:
-                for ln in f:
-                    if ln.startswith("#ping "):
-                        parts = ln.strip().split()
-                        if len(parts) >= 2:
-                            ip = parts[1]
-                            cmds.append(["ping", "-c", PING_COUNT, ip])
-            self.commands, self.cmd_index = cmds, 0
-            self.log.clear()
-            self.run_next()
-            self.update_tray_icon()
-            # After bringing up, run the sanity check (after all commands finish)
-            def _sanity_check_iface(log, iface):
-                tries = 0
-                max_tries = 3
-                while tries < max_tries:
-                    result = subprocess.run(["ifconfig", iface], capture_output=True, text=True)
-                    if iface in result.stdout:
-                        log.append(f"[+] Interface {iface} present after wg-quick up.\n")
-                        return
-                    else:
-                        log.append(f"[!] Interface {iface} not present after wg-quick up — retrying ({tries+1}/{max_tries})...\n")
-                        time.sleep(1)
-                        subprocess.run(["doas", WG_QUICK, "up", iface])
-                    tries += 1
-                log.append(f"[X] Interface {iface} still not present after {max_tries} attempts. Giving up.\n")
-            QTimer.singleShot(2000, lambda: _sanity_check_iface(self.log, SYSTEM_IFACE))
-            self.btnToggle.setChecked(True)
-            self.btnToggle.style().unpolish(self.btnToggle)
-            self.btnToggle.style().polish(self.btnToggle)
-            self.btnToggle.update()
-            self.btnToggle.setText("Deactivate")
-            self.btnProfileToggle.setText("Disconnect")
-            self.btnProfileToggle.setChecked(True)
-        else:
-            self.log.append("🔻 Disconnecting...\n")
-            self.on_disconnect()
-            self.btnProfileToggle.setText("Connect")
-            self.btnProfileToggle.setChecked(False)
-            self.btnToggle.setText("Activate")
-            self.btnToggle.setChecked(False)
-            
-    def run_next(self):
-        if self.cmd_index >= len(self.commands):
-            return
+        # Log exactly what file is being passed
+        self.log.append(f"▶ Bringing down profile: {prof}.conf")
 
-        cmd = self.commands[self.cmd_index]
-        self.append_log(f"> {' '.join(cmd)}")
-
-        # Clean up previous QProcess if running
+        # If a process is already running, terminate it first (safety)
         if hasattr(self, "process") and self.process is not None:
-            self.process.readyReadStandardOutput.disconnect()
-            self.process.readyReadStandardError.disconnect()
-            self.process.finished.disconnect()
-            self.process.kill()
-            self.process.deleteLater()
+            try:
+                self.process.kill()
+                self.process.deleteLater()
+            except Exception:
+                pass
 
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self.process.readyReadStandardOutput.connect(self.handle_stdout)
-        self.process.readyReadStandardError.connect(self.handle_stderr)
-        self.process.finished.connect(self.run_next_finished)
-        self.process.start(cmd[0], cmd[1:])
+        self.process.readyReadStandardOutput.connect(self.on_stdout)
+        self.process.readyReadStandardError.connect(self.on_stderr)
 
-    def run_next_finished(self):
-        self.cmd_index += 1
-        self.run_next()
+        def finished_cb():
+            self.update_toggle_button()
+            self.tray_icon.setIcon(QIcon(self.icon_disconnected_path))
+            self.btnToggleLabel.setText("Activate")
+            self.btnToggle.setChecked(False)
+            self.refresh_status()
 
-    def handle_stdout(self):
-        output = self.process.readAllStandardOutput().data().decode()
-        if output:
-            # Append output line-by-line
-            for line in output.splitlines(True):
-                self.append_log(line)
+        self.process.finished.connect(finished_cb)
+        self.process.start(PRIV_ESC, [WG_MULTI_SCRIPT, "down", f"{prof}.conf"])
 
-    def handle_stderr(self):
-        err = self.process.readAllStandardError().data().decode()
-        if err:
-            for line in err.splitlines(True):
-                self.append_log(line)
+    def on_disconnect_all(self):
+        # Disconnect all WireGuard profiles (best effort), blocking until each is down
+        for conf_path in glob.glob(os.path.join(WG_DIR, '*.conf')):
+            prof = os.path.splitext(os.path.basename(conf_path))[0]
+            try:
+                self.append_log(f"🛑 Disconnecting {prof}...\n")
+                subprocess.run([PRIV_ESC, WG_MULTI_SCRIPT, 'down', f"{prof}.conf"], check=False)
+            except Exception as e:
+                self.append_log(f"⚠ Error disconnecting {prof}: {e}\n")
 
+
+    
+    def on_toggle_state(self, checked):
+        if checked:
+            self.on_connect()
+        else:
+            self.on_disconnect()
+    def update_toggle_button(self):
+        item = self.list.currentItem()
+        prof = item.data(Qt.ItemDataRole.UserRole) if item else None
+        
+        #utun_iface = self.is_interface_up(prof)
+        #self.btnToggle.setChecked(bool(utun_iface))
+        #self.btnToggleLabel.setText("Deactivate" if utun_iface else "Activate")
+        
+        # block the toggled signal so we don't accidentally call on_disconnect()
+        utun_iface = self.is_interface_up(prof)
+        # again, suppress toggled() while syncing UI
+        self.btnToggle.blockSignals(True)
+        self.btnToggle.setChecked(bool(utun_iface))
+        self.btnToggle.blockSignals(False)
+        self.btnToggleLabel.setText("Deactivate" if utun_iface else "Activate")
+
+        
+    # --- Log Output and Event Filter ---
+    def append_log(self, text):
+        scrollbar = self.log.verticalScrollBar()
+        at_bottom = scrollbar.value() == scrollbar.maximum()
+        cursor = self.log.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.log.setTextCursor(cursor)
+        self.log.insertPlainText(text if text.endswith("\n") else text + "\n")
+        if at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+    def eventFilter(self, obj, event):
+        if obj is self.log and event.type() == QEvent.Type.MouseButtonDblClick:
+            sb = self.log.verticalScrollBar()
+            sb.setValue(sb.maximum())
+            return True
+        return super().eventFilter(obj, event)
     def on_stdout(self):
         out = self.process.readAllStandardOutput().data().decode()
+        scrollbar = self.log.verticalScrollBar()
+        at_bottom = scrollbar.value() == scrollbar.maximum()
         self.log.insertPlainText(out)
-        self.log.moveCursor(QTextCursor.MoveOperation.End)
-
+        if at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
     def on_stderr(self):
         err = self.process.readAllStandardError().data().decode()
+        scrollbar = self.log.verticalScrollBar()
+        at_bottom = scrollbar.value() == scrollbar.maximum()
         self.log.insertPlainText(err)
-        self.log.moveCursor(QTextCursor.MoveOperation.End)
-
-    def parse_wg_show(self):
-        return parse_wg_show()
-
-# Profile editor      
-
+        if at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+    # --- Profile Editor Dialogs (Unified) ---
     def edit_selected_profile(self):
-        """Open the selected profile in a QPlainTextEdit dialog with its public key displayed."""
-        # Move import to top of method for Qt.ItemDataRole.UserRole use
-        from PyQt6.QtCore import Qt
         itm = self.list.currentItem()
         if not itm:
             self.log.append("⚠ Select a profile to edit.\n")
@@ -1131,15 +1443,12 @@ class WGGui(QWidget):
         if not os.path.exists(conf_path):
             self.log.append(f"⚠ Profile file not found: {conf_path}\n")
             return
-
         try:
             with open(conf_path, "r") as f:
                 content = f.read()
         except Exception as e:
             self.log.append(f"⚠ Failed to read profile: {e}\n")
             return
-
-        # Attempt to extract PrivateKey from [Interface] section
         privkey = ""
         in_interface = False
         for line in content.splitlines():
@@ -1153,71 +1462,25 @@ class WGGui(QWidget):
                 _, privkey = lstripped.split("=", 1)
                 privkey = privkey.strip()
                 break
-
         pubkey = "(invalid)"
         if privkey:
             try:
                 pubkey = subprocess.run(["wg", "pubkey"], input=privkey.encode(), stdout=subprocess.PIPE).stdout.decode().strip()
             except Exception:
                 pass
-
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QPlainTextEdit, QLabel, QLineEdit
-        from PyQt6.QtGui import QFont
-        # Qt already imported above in this method
-
-        class EditorDialog(QDialog):
-            def __init__(self, parent=None, title="Edit", text="", prof_name="", pubkey=""):
-                super().__init__(parent)
-                self.setWindowTitle(title)
-                self.setMinimumSize(600, 400)
-
-                self.profile_name = QLineEdit(prof_name)
-                self.profile_name.setReadOnly(True)
-
-                pubkey_label = QLabel(f"Public key: {pubkey}")
-                pubkey_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                pubkey_label.setStyleSheet("QLabel {{ font-family: monospace; padding: 4px; color: #4caf50; }}")
-
-                self.text_edit = QPlainTextEdit()
-                self.text_edit.setPlainText(text)
-                font = QFont("SF Mono")
-                if not font.exactMatch():
-                    font = QFont("Menlo")
-                font.setStyleHint(QFont.StyleHint.Monospace)
-                self.text_edit.setFont(font)
-                self.highlighter = WireGuardHighlighter(self.text_edit.document())
-
-                buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-                buttons.accepted.connect(self.accept)
-                buttons.rejected.connect(self.reject)
-
-                layout = QVBoxLayout()
-                layout.addWidget(QLabel("Name:"))
-                layout.addWidget(self.profile_name)
-                layout.addWidget(pubkey_label)
-                layout.addWidget(self.text_edit)
-                layout.addWidget(buttons)
-                self.setLayout(layout)
-
-            def get_text(self):
-                return self.text_edit.toPlainText()
-
-        dlg = EditorDialog(self, title=f"Edit Profile: {prof}", text=content, prof_name=prof, pubkey=pubkey)
+        dlg = ProfileEditorDialog(self, title=f"Edit Profile: {prof}", text=content, prof_name=prof, pubkey=pubkey, editable_name=False)
         if dlg.exec():
             try:
-                with open(conf_path, "w") as f:
-                    f.write(dlg.get_text())
+                new_text = dlg.get_text()
+                with tempfile.NamedTemporaryFile("w", delete=False) as tmpf:
+                    tmpf.write(new_text)
+                    tmp_path = tmpf.name
+                subprocess.run([PRIV_ESC, "cp", tmp_path, conf_path])
+                os.remove(tmp_path)
                 self.log.append(f"✅ Saved changes to {prof}.conf\n")
             except Exception as e:
                 self.log.append(f"⚠ Failed to save profile: {e}\n")
-
-# Add new profile
     def add_profile(self):
-        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QPlainTextEdit, QLabel, QLineEdit
-        from PyQt6.QtGui import QFont
-        from PyQt6.QtCore import Qt
-        import subprocess
-
         try:
             privkey = subprocess.check_output(["wg", "genkey"]).decode().strip()
             pubkey = subprocess.run(["wg", "pubkey"], input=privkey.encode(), stdout=subprocess.PIPE).stdout.decode().strip()
@@ -1232,84 +1495,55 @@ ListenPort =
 DNS = 
 """
 
-        class EditorDialog(QDialog):
-            def __init__(self, parent=None, pubkey="", template=""):
-                super().__init__(parent)
-                self.setWindowTitle("New WireGuard Profile")
-                self.setMinimumSize(640, 500)
-
-                self.profile_name = QLineEdit()
-                self.profile_name.setPlaceholderText("Enter profile name")
-
-                pubkey_label = QLabel(f"Public key: {pubkey}")
-                pubkey_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                pubkey_label.setStyleSheet("QLabel {{ font-family: monospace; padding: 4px; color: #4caf50; }}")
-
-                self.text_edit = QPlainTextEdit()
-                self.text_edit.setPlainText(template)
-
-                font = QFont("SF Mono")
-                if not font.exactMatch():
-                    font = QFont("Menlo")
-                font.setStyleHint(QFont.StyleHint.Monospace)
-                self.text_edit.setFont(font)
-
-                self.highlighter = WireGuardHighlighter(self.text_edit.document())
-
-                buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-                buttons.accepted.connect(self.accept)
-                buttons.rejected.connect(self.reject)
-
-                layout = QVBoxLayout()
-                layout.addWidget(QLabel("Name:"))
-                layout.addWidget(self.profile_name)
-                layout.addWidget(pubkey_label)
-                layout.addWidget(self.text_edit)
-                layout.addWidget(buttons)
-                self.setLayout(layout)
-
-            def get_profile_name(self):
-                return self.profile_name.text().strip()
-
-            def get_text(self):
-                return self.text_edit.toPlainText()
-
-        dlg = EditorDialog(self, pubkey=pubkey, template=template)
+        dlg = ProfileEditorDialog(self, title="New WireGuard Profile", text=template, prof_name="", pubkey=pubkey, editable_name=True)
         if dlg.exec():
             prof = dlg.get_profile_name()
             if not prof:
                 QMessageBox.warning(self, "Invalid Name", "Profile name cannot be empty.")
                 return
+
             conf_path = os.path.join(WG_DIR, f"{prof}.conf")
             if os.path.exists(conf_path):
                 QMessageBox.warning(self, "Error", f"Profile '{prof}' already exists.")
                 return
+
             try:
-                with open(conf_path, "w") as f:
-                    f.write(dlg.get_text())
+                # Write to temporary file first
+                with tempfile.NamedTemporaryFile("w", delete=False) as tmpf:
+                    tmpf.write(dlg.get_text())
+                    tmp_path = tmpf.name
+
+                # Move it with doas/sudo
+                subprocess.run([PRIV_ESC, "mv", tmp_path, conf_path], check=True)
                 self.log.append(f"✅ Created profile: {prof}.conf\n")
                 self.load_profiles()
             except Exception as e:
                 self.log.append(f"⚠ Failed to create profile: {e}\n")
-
-# Delete profile
     def delete_profile(self):
         item = self.list.currentItem()
         if not item:
             self.log.append("⚠ No profile selected to delete.\n")
             return
+
         prof = item.data(Qt.ItemDataRole.UserRole)
         conf_path = os.path.join(WG_DIR, f"{prof}.conf")
-        try:
-            os.remove(conf_path)
-            self.log.append(f"🗑️ Deleted profile: {prof}\n")
-            self.load_profiles()
-        except Exception as e:
-            self.log.append(f"⚠ Failed to delete profile {prof}: {e}\n")
 
-# Upload profile
+        reply = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Are you sure you want to delete profile '{prof}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                subprocess.run([PRIV_ESC, "rm", "-f", conf_path], check=True)
+                self.log.append(f"🗑️ Deleted profile: {prof}\n")
+                self.load_profiles()
+            except Exception as e:
+                self.log.append(f"⚠ Failed to delete profile {prof}: {e}\n")
     def upload_profile(self):
-        from PyQt6.QtWidgets import QFileDialog
         file_path, _ = QFileDialog.getOpenFileName(self, "Upload Profile", "", "WireGuard Config (*.conf)")
         if file_path:
             dst_path = os.path.join(WG_DIR, os.path.basename(file_path))
@@ -1319,12 +1553,7 @@ DNS =
                 self.load_profiles()
             except Exception as e:
                 self.log.append(f"⚠ Failed to upload: {e}\n")
-
-# Download profiles .zip
     def download_profiles(self):
-        from PyQt6.QtWidgets import QFileDialog
-        import zipfile
-
         file_path, _ = QFileDialog.getSaveFileName(self, "Save ZIP Archive", "wireguard_profiles.zip", "ZIP Archive (*.zip)")
         if not file_path:
             return
@@ -1337,16 +1566,90 @@ DNS =
             self.log.append(f"📦 Downloaded all profiles to {file_path}\n")
         except Exception as e:
             self.log.append(f"⚠ Failed to create ZIP archive: {e}\n")
+    # --- Command Chaining for Advanced Use ---
+    def run_next(self):
+        if self.cmd_index >= len(self.commands):
+            return
+        cmd = self.commands[self.cmd_index]
+        self.append_log(f"> {' '.join(cmd)}")
+        if hasattr(self, "process") and self.process is not None:
+            self.process.readyReadStandardOutput.disconnect()
+            self.process.readyReadStandardError.disconnect()
+            self.process.finished.disconnect()
+            self.process.kill()
+            self.process.deleteLater()
+        self.process = QProcess(self)
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.process.readyReadStandardOutput.connect(self.on_stdout)
+        self.process.readyReadStandardError.connect(self.on_stderr)
+        self.process.finished.connect(self.run_next_finished)
+        self.process.start(cmd[0], cmd[1:])
+    def run_next_finished(self):
+        self.cmd_index += 1
+        self.run_next()
+
+
+    # --- Run Tool Script for Tools Tab ---
+    def run_tool_script(self, script_path):
+        self.append_tool_output(f"▶ Running {os.path.basename(script_path)}...\n")
+
+        self.tool_runner = ToolRunner(script_path)
+        self.tool_runner.output.connect(self.append_tool_output)
+        self.tool_runner.error.connect(self.append_tool_output)
+        self.tool_runner.done.connect(self.on_tool_done)
+        self.tool_runner.start()
+
+    def on_tool_done(self):
+        self.append_tool_output("✅ Done.\n")
+
+    def append_tool_output(self, text):
+        if hasattr(self, 'tools_output') and self.tools_output:
+            self.tools_output.appendPlainText(text)
+            scrollbar = self.tools_output.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    # --- Remove old Profiles double-click handler ---
+    # def on_profiles_double_clicked(self, item):
+    #     ...
 
 if __name__ == "__main__":
     if is_already_running():
         print("🚫 WireGuard Client is already running.")
         sys.exit(0)
-
     instance_lock = create_instance_lock()
-
+    load_active_connections()
     app = QApplication(sys.argv)
-    app.setStyleSheet(APP_STYLESHEET)  # <-- Apply styles
+    app.setStyleSheet(APP_STYLESHEET)
     gui = WGGui()
     gui.show()
-    sys.exit(app.exec())
+    sys.exit(app.exec())		
+
+    def tear_down_full_tunnels(self, prof):
+        """Tear down any other active full-tunnel before connecting prof."""
+        # Load active profiles from WG_UTUN_MAP
+        active_profiles = {}
+        try:
+            if os.path.exists(WG_UTUN_MAP):
+                with open(WG_UTUN_MAP, "r") as f:
+                    for line in f:
+                        if "|" not in line:
+                            continue
+                        iface, conf = line.strip().split("|", 1)
+                        if conf.endswith(".conf"):
+                            name = os.path.splitext(os.path.basename(conf))[0]
+                            active_profiles[name] = iface
+        except Exception:
+            pass
+        # For each other full-tunnel, bring it down
+        for other_prof, other_iface in active_profiles.items():
+            if other_prof == prof:
+                continue
+            other_conf = os.path.join(WG_DIR, f"{other_prof}.conf")
+            try:
+                with open(other_conf) as ocf:
+                    if "0.0.0.0/0" in ocf.read():
+                        self.log.append(f"🛑 Tearing down active full-tunnel: {other_prof}")
+                        subprocess.run([PRIV_ESC, WG_MULTI_SCRIPT, "down", f"{other_prof}.conf"])
+                        time.sleep(1)
+            except Exception as e:
+                self.log.append(f"⚠ Error tearing down {other_prof}: {e}")
