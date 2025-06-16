@@ -562,6 +562,8 @@ class WGGui(QWidget):
         self.intf_form_layout.setVerticalSpacing(8)
         self.intf_form_layout.setHorizontalSpacing(32)
         self.intf_form_layout.setSpacing(8)
+        
+        #####
         self.intf_form_layout.setContentsMargins(12, 12, 12, 12)
 
         # --- Status Dot Row ---
@@ -607,11 +609,13 @@ class WGGui(QWidget):
         ]:
             label = QLabel(name)
             label.setFont(left_label_font)
-            label.setMinimumWidth(130)
-            label.setMaximumWidth(130)
+            label.setMinimumWidth(0)
+            label.setMaximumWidth(0)
             label.setMinimumHeight(ROW_HEIGHT)
             label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            widget.setContentsMargins(5, 0, 0, 0)
+
             self.intf_form_layout.addRow(label, widget)
 
         # --- Activate/Deactivate Toggle Button with custom shadowed label ---
@@ -680,7 +684,7 @@ class WGGui(QWidget):
 
         # Add the button to its parent layout
         toggle_btn_layout = QHBoxLayout()
-        toggle_btn_layout.setContentsMargins(170, 0, 0, 0)
+        toggle_btn_layout.setContentsMargins(140, 0, 0, 0)
         toggle_btn_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         toggle_btn_layout.addWidget(self.btnToggle)
 
@@ -698,6 +702,7 @@ class WGGui(QWidget):
         self.peer_form_layout.setHorizontalSpacing(32)
         self.peer_form_layout.setVerticalSpacing(8)
         intf_layout.setContentsMargins(12, 12, 12, 12)
+        self.peer_form_layout.setContentsMargins(12, 12, 12, 12)
 
         self.peer_form_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         self.peer_form_layout.setFormAlignment(Qt.AlignmentFlag.AlignTop)
@@ -713,9 +718,9 @@ class WGGui(QWidget):
             lbl.setFont(label_font)
             lbl.setProperty("class", "data-label")
             lbl.setWordWrap(False)
-            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+            lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
             lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            lbl.setMinimumHeight(18)
+            lbl.setMinimumHeight(ROW_HEIGHT)
         for name, widget in [
             ("Public Key:", self.lbl_peer_key),
             ("PreShared Key:", self.lbl_preshared),
@@ -726,14 +731,14 @@ class WGGui(QWidget):
         ]:
             label = QLabel(name)
             label.setFont(left_label_font)
-            label.setMinimumWidth(130)
-            label.setMaximumWidth(130)
+            label.setMinimumWidth(0)
+            label.setMaximumWidth(0)
             label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
             label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            widget.setContentsMargins(20, 0, 0, 0)
+            widget.setContentsMargins(15, 0, 0, 0)
             self.peer_form_layout.addRow(label, widget)
         self.peer_group.setLayout(self.peer_form_layout)
-        self.peer_group.layout().setContentsMargins(26, 26, 26, 26)
+        self.peer_group.layout() #.setContentsMargins(26, 26, 26, 26)
 
         # --- Action Buttons (Single Helper Setup) ---
         def setup_btn(icon, tooltip, cb, width=30, use_custom_icon=False):
