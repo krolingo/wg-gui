@@ -1,14 +1,55 @@
 #!/bin/sh
 
 MIN_SAFE_UTUN_INDEX=10
-AS_ROOT="/opt/local/bin/doas"
+
+# === Choose privilege escalation: doas or sudo ===
+AS_ROOT="/opt/local/bin/doas"   # Change to "/usr/bin/sudo" if you want to use sudo instead of doas
+
+# Path to wireguard-go binary
 WGGO="/opt/local/bin/wireguard-go"
+
 PROFILE_DIR="/usr/local/etc/wireguard/profiles"
 STATE_DIR="/tmp/wg-multi"
 BASE_IFNUM=2
 MAPPING_FILE="/tmp/wg-multi/wg-utun.map"
 
+# NOTE: We only write to MAPPING_FILE via ${AS_ROOT} and always read it using root-level access.
 mkdir -p "$STATE_DIR"
+
+check_orphaned_utuns() {
+    orphaned=false
+    for utun in $(ifconfig -l | grep -Eo 'utun[0-9]+'); do
+        if ! ifconfig "$utun" 2>/dev/null | grep -q 'wg'; then
+            orphaned=true
+            break
+        fi
+    done
+    if $orphaned && [ -z "$(pgrep wireguard-go)" ]; then
+        echo "⚠️  Detected orphaned utuns without wireguard-go — forcing cleanup..."
+        reset_utun_interfaces
+    fi
+}
+
+reset_utun_interfaces() {
+    echo "🧹 Cleaning up orphaned utun interfaces..."
+    for utun in $(ifconfig -l | grep -Eo 'utun[0-9]+'); do
+        if ! ifconfig "$utun" 2>/dev/null | grep -q 'wg'; then
+            echo "❌ Orphaned $utun — attempting kill & destroy..."
+            pid=$(pgrep -f "wireguard-go.*$utun")
+            if [ -n "$pid" ]; then
+                echo "🔪 Killing wireguard-go process PID: $pid"
+                kill "$pid"
+            fi
+            ifconfig "$utun" destroy 2>/dev/null || echo "⚠️  Could not destroy $utun"
+        fi
+    done
+    echo "🗑 Flushing residual routes..."
+    netstat -rn | grep -E 'utun[0-9]+' | awk '{print $1}' | while read -r net; do
+        route delete "$net" 2>/dev/null
+    done
+    echo "🔄 Restoring DNS to backup or fallback /etc/resolv.conf"
+    [ -f /etc/resolv.conf.bak ] && cp /etc/resolv.conf.bak /etc/resolv.conf
+}
 
 usage() {
   echo "Usage: $0 up|down|list profile.conf"
@@ -162,6 +203,28 @@ bring_down() {
   "${AS_ROOT}" rm -f "$STATE_DIR/${INTERFACE}.profile"
 }
 
+list_active() {
+  printf "%-10s %-25s %-20s %-20s %-25s\n" "Interface" "Profile" "Handshake" "AllowedIPs" "Endpoint"
+  echo "-------------------------------------------------------------------------------------------------------"
+
+  for iface in $(ls "$STATE_DIR" | grep '\.profile$' | sed 's/\.profile$//'); do
+    # Skip and ignore interfaces that no longer exist
+    if ! ifconfig "$iface" >/dev/null 2>&1; then
+      continue
+    fi
+    PROFILE_FILE=$(cat "$STATE_DIR/${iface}.profile" 2>/dev/null || echo "-")
+    HANDSHAKE=$("${AS_ROOT}" wg show "$iface" latest-handshakes | awk '{print $2}')
+    if [ -z "$HANDSHAKE" ] || [ "$HANDSHAKE" -eq 0 ] 2>/dev/null; then
+      HANDSHAKE_STR="Never"
+    else
+      HANDSHAKE_STR="$(($(date +%s) - HANDSHAKE))s ago"
+    fi
+    ALLOWED=$("${AS_ROOT}" wg show "$iface" allowed-ips | awk '{print $2}' | paste -sd "," -)
+    ENDPOINT=$("${AS_ROOT}" wg show "$iface" endpoints | awk '{print $2}')
+    printf "%-10s %-25s %-20s %-20s %-25s\n" "$iface" "$PROFILE_FILE" "$HANDSHAKE_STR" "$ALLOWED" "$ENDPOINT"
+  done
+}
+
 CMD="$1"
 PROFILE="$2"
 
@@ -173,6 +236,9 @@ case "$CMD" in
   down)
     [ -z "$PROFILE" ] && usage
     bring_down "$PROFILE"
+    ;;
+  list)
+    list_active
     ;;
   *)
     usage
