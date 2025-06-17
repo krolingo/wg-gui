@@ -29,3 +29,19 @@ done
 
 echo ""
 echo "Summary: $online online, $offline offline."
+
+sleep .5
+  echo "🧪 DNS Tests"
+  echo "-------------------------------------------------------"
+  echo "pfsense.xmcnetwork.com"
+  /usr/local/bin/dig +short pfsense.xmcnetwork.com
+  echo "-------------------------------------------------------"
+  echo "freebsd.org"
+  /usr/local/bin/dig +short freebsd.org
+  echo "-------------------------------------------------------"
+  echo "apple.com"
+  /usr/local/bin/dig +short apple.com
+fi
+
+echo "✅ DNS restart complete"
+exit 0
