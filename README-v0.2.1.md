@@ -220,7 +220,7 @@ Released: (2025-06-22)
 | `restart_wifi.sh` | Simple macOS script to power-cycle the Wi-Fi interface using `networksetup`. |
 | `routing_flush.sh`| Cross-platform script to delete default routes and reacquire DHCP or reset routing state. |
 | `CheckRoutes.sh`  | Audits current routing table to ensure that required tunnels (especially 0.0.0.0/0) are active and prioritized. |
-| `Troll.sh`        | A humorous script that simulates terminal output — use it for stress testing or fun. |
+| `Troll.sh`        | Prints system info. |
 
 ### Development Enhancements
 - All helper scripts now resolve platform-specific tool paths.
