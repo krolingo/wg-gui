@@ -103,16 +103,31 @@ done
     } | doas tee /etc/resolv.conf > /dev/null
   fi
 
+  # === PostUp hook (with %i expansion) ===
   if grep -q "^PostUp" "$PROFILE_PATH" 2>/dev/null; then
-    postup="$(grep '^PostUp' "$PROFILE_PATH" | cut -d'=' -f2- | xargs)"
-    if [ -x "$postup" ]; then
-      echo "🔧 Running PostUp hook: $postup"
-      "$postup"
+    # read raw command (everything after the '=')
+    raw=$(grep '^PostUp' "$PROFILE_PATH" | cut -d'=' -f2-)
+
+    # trim whitespace and expand %i to the actual interface
+    raw=$(echo "$raw" \
+      | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            -e "s/%i/$INTERFACE/g")
+
+    # split into executable and its args
+    cmd=$(echo "$raw" | awk '{print $1}')
+    args=$(echo "$raw" | cut -s -d' ' -f2-)
+
+    if [ -x "$cmd" ]; then
+      echo "🔧 Running PostUp hook: $cmd $args"
+      "$cmd" $args
+    else
+      echo "⚠️ PostUp hook not executable or missing: $cmd"
     fi
   fi
 
   echo "$PROFILE_FILE" | doas tee "$STATE_DIR/${INTERFACE}.profile" > /dev/null
 }
+
 
 bring_down() {
   PROFILE_FILE="$1"

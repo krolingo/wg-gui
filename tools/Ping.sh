@@ -1,5 +1,14 @@
 #!/bin/sh
 
+OS=$(uname)
+if [ "$OS" = "Darwin" ]; then
+    DIG="/usr/bin/dig"
+elif [ "$OS" = "FreeBSD" ]; then
+    DIG="/usr/local/bin/dig"
+else
+    DIG="dig"  # fallback
+fi
+
 # Servers to ping
 servers="freebsd.org apple.com google.com amazon.com github.com"
 
@@ -29,3 +38,18 @@ done
 
 echo ""
 echo "Summary: $online online, $offline offline."
+
+sleep .5
+echo "🧪 DNS Tests"
+echo "-------------------------------------------------------"
+echo "pfsense.xmcnetwork.com"
+$DIG +short pfsense.xmcnetwork.com
+echo "-------------------------------------------------------"
+echo "freebsd.org"
+$DIG +short freebsd.org
+echo "-------------------------------------------------------"
+echo "apple.com"
+$DIG +short apple.com
+
+echo "✅ DNS restart complete"
+exit

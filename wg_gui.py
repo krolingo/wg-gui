@@ -6,6 +6,7 @@ import sys
 import platform
 import shutil
 import subprocess
+from priv import run_priv, build_qprocess_args
 import time
 import json
 import tempfile
@@ -35,15 +36,71 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 # === Feature Toggles ===
 ENABLE_TOOLS_TAB = True  # Toggle this to False to disable Tools tab
 
-PRIV_ESC = "sudo"  # or "doas"
+# Choose privilege escalation: prefer doas, then sudo
+import shutil, sys, os
+if shutil.which("doas"):
+    PRIV_ESC = "doas"
+elif shutil.which("sudo"):
+    PRIV_ESC = "sudo"
+else:
+    PRIV_ESC = ""
+
+# Locate wg binary: packaged Resources/bin or common system paths
+def find_wg_bin():
+    # packaged .app Resources/bin
+    if getattr(sys, "frozen", False):
+        bundle_dir = os.path.dirname(sys.executable)
+        resources_dir = os.path.normpath(os.path.join(bundle_dir, "..", "Resources"))
+        bin_dir = os.path.join(resources_dir, "bin")
+        wg_path = os.path.join(bin_dir, "wg")
+        if os.path.isfile(wg_path) and os.access(wg_path, os.X_OK):
+            return wg_path
+        # Also check bundled bundle-tools/wg
+        tools_dir = os.path.join(resources_dir, "bundle-tools")
+        wg_path_tools = os.path.join(tools_dir, "wg")
+        if os.path.isfile(wg_path_tools) and os.access(wg_path_tools, os.X_OK):
+            return wg_path_tools
+    # common install locations
+    for p in ("/opt/homebrew/bin/wg", "/usr/local/bin/wg", "/opt/local/bin/wg"):
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    # fallback to PATH
+    return shutil.which("wg")
+
+# Resolve wg binary path
+WG_BIN = find_wg_bin()
+if not WG_BIN:
+    # Fail early if wg binary is missing (avoid showing Qt widgets before QApplication)
+    print("Error: 'wg' binary not found; please install WireGuard.", file=sys.stderr)
+    sys.exit(1)
 # === Constants and Paths ===
 WG_DIR = "/usr/local/etc/wireguard/profiles"
 SYSTEM_CONF_DIR = "/usr/local/etc/wireguard"
 HOME_DIR = os.path.expanduser("~")
 IS_MACOS = platform.system() == "Darwin"
 # SCRIPT_BASE is a symlink 
-SCRIPT_BASE = "/usr/local/etc/wg-gui/scripts"
-WG_MULTI_SCRIPT = os.path.join(SCRIPT_BASE, "wg-multi-macos.sh" if IS_MACOS else "wg-multi-freebsd.sh")
+import sys
+import os
+
+#
+# Determine script bundle location: if running as a packaged .app, use its Resources/scripts folder
+if getattr(sys, "frozen", False):
+    # When frozen by PyInstaller or similar, sys.executable is .../YourApp.app/Contents/MacOS/YourApp
+    bundle_dir = os.path.dirname(sys.executable)
+    # Resources are typically in .../YourApp.app/Contents/Resources
+    resources_dir = os.path.normpath(os.path.join(bundle_dir, "..", "Resources"))
+    SCRIPT_BASE = os.path.join(resources_dir, "scripts")
+    # Prepend bundle-tools to PATH for bundled tools/binaries
+    tools_dir = os.path.join(resources_dir, "bundle-tools")
+    os.environ["PATH"] = tools_dir + os.pathsep + os.environ["PATH"]
+else:
+    # Developer or non-packaged install
+    SCRIPT_BASE = "/usr/local/etc/wg-gui/scripts"
+
+WG_MULTI_SCRIPT = os.path.join(
+    SCRIPT_BASE,
+    "wg-multi-macos.sh" if IS_MACOS else "wg-multi-freebsd.sh"
+)
 ACTIVE_MAP_PATH = os.path.join(SCRIPT_BASE, "active_connections.json")
 WG_UTUN_DIR = "/tmp/wg-multi"
 WG_UTUN_MAP = os.path.join(WG_UTUN_DIR, "wg-utun.map")
@@ -190,9 +247,9 @@ def time_ago(epoch):
 def parse_wg_show(iface_name=SYSTEM_IFACE):
     iface_info, peer_info = {}, {}
     try:
-        out = subprocess.check_output(
-            [PRIV_ESC, "wg", "show", iface_name],
-        ).decode().strip()
+        # Always run 'wg show' with elevated privileges to avoid permission errors
+        cp = run_priv([PRIV_ESC, WG_BIN, "show", iface_name], stdout=subprocess.PIPE, check=True)
+        out = cp.stdout.decode().strip()
         lines = out.splitlines()
         for line in lines:
             line = line.strip()
@@ -449,30 +506,55 @@ class WGGui(QWidget):
 
     def __init__(self):
         super().__init__()
+        # Prompt to create profiles directory if missing
+        if not os.path.isdir(WG_DIR):
+            resp = QMessageBox.question(
+                self,
+                "Create profiles directory",
+                f"The WireGuard profiles directory '{WG_DIR}' does not exist. Create it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if resp == QMessageBox.StandardButton.Yes:
+                try:
+                    run_priv(["mkdir", "-p", WG_DIR], check=True)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to create '{WG_DIR}':\n{e}")
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Directory missing",
+                    "Profiles directory is required. The application may not function correctly until it exists."
+                )
         if platform.system() == "Darwin":
-         try:
-             output = subprocess.check_output(
-                 ["ifconfig", "-l"],
-                 stdout=subprocess.DEVNULL,
-                 stderr=subprocess.DEVNULL
-             ).decode()
-             utuns = [u for u in output.strip().split() if u.startswith("utun")]
-             for u in utuns:
-                 try:
-                     subprocess.check_call(
-                         [PRIV_ESC, "wg", "show", u],
-                         stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL
-                     )
-                 except subprocess.CalledProcessError:
-                     print(f"Cleaning up orphaned {u}...", file=sys.stderr)
-                     subprocess.run(
-                         [PRIV_ESC, "ifconfig", u, "destroy"],
-                         stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL
-                     )
-         except Exception as e:
-             print(f"Orphan utun cleanup error: {e}", file=sys.stderr)
+            try:
+                # List all utun interfaces
+                output = subprocess.check_output(
+                    ["ifconfig", "-l"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                ).decode()
+                utuns = [u for u in output.strip().split() if u.startswith("utun")]
+                # Find orphans: utuns without a running wg instance
+                orphans = []
+                for u in utuns:
+                    try:
+                        # Check without elevation to avoid prompts
+                        subprocess.check_call(
+                            ["wg", "show", u],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                    except subprocess.CalledProcessError:
+                        orphans.append(u)
+                # Destroy all orphans in one elevated call to prompt only once
+                if orphans:
+                    import shlex
+                    cmds = "; ".join(f"ifconfig {shlex.quote(u)} destroy" for u in orphans)
+                    # Use run_priv to wrap in one AppleScript prompt on macOS
+                    run_priv(["bash", "-c", cmds], check=True)
+            except Exception as e:
+                print(f"Orphan utun cleanup error: {e}", file=sys.stderr)
 
         # --- Icons and resources ---
         icon_names = ["wireguard_off.png", "wg_connected.png"]
@@ -1128,7 +1210,12 @@ class WGGui(QWidget):
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         proc.finished.connect(lambda code, status: self.handle_multi_list_finished(proc))
-        proc.start(PRIV_ESC, [WG_MULTI_SCRIPT, "list"])
+        # Run list without elevation on macOS to avoid repeated password prompts
+        if IS_MACOS:
+            proc.start(WG_MULTI_SCRIPT, ["list"])
+        else:
+            prog, args = build_qprocess_args([WG_MULTI_SCRIPT, "list"])
+            proc.start(prog, args)
 
     def handle_multi_list_finished(self, proc: QProcess):
         """Called when ‘wg-multi list’ completes—refresh the text view."""
@@ -1148,14 +1235,12 @@ class WGGui(QWidget):
         show_iface = utun_iface or "-"
         self.intf_group.setTitle(f"Interface: {show_iface} / Profile: {show_profile or '-'}")
         self.btnDisconnect.setEnabled(bool(utun_iface))
-        #self.btnToggle.setChecked(bool(utun_iface))
-        #self.btnToggleLabel.setText("Deactivate" if utun_iface else "Activate")
         # block the toggled signal so we don't accidentally call on_disconnect()
         self.btnToggle.blockSignals(True)
         self.btnToggle.setChecked(bool(utun_iface))
         self.btnToggle.blockSignals(False)
         self.btnToggleLabel.setText("Deactivate" if utun_iface else "Activate")
-        
+
         if utun_iface and is_low_utun(utun_iface):
             self.log.append(f"⚠ WARNING: Selected profile is using {utun_iface} (reserved for macOS system use).")
         self.status_dot.clear()
@@ -1188,6 +1273,25 @@ class WGGui(QWidget):
             self.lbl_port.setText(conf_port)
             hide_empty_rows(self.intf_form_layout, iface_conf, {"Status", "Public Key", "Listen Port", "Addresses", "DNS Servers"})
             hide_empty_rows(self.peer_form_layout, peer_conf, {"Public Key", "Allowed IPs", "Endpoint", "Last Handshake", "Transfer"})
+        # Override with live wg show data if interface is up
+        if utun_iface:
+            iface_info, peer_info = parse_wg_show(utun_iface)
+            # Interface fields
+            if iface_info.get('pubkey'):
+                self.lbl_pubkey.setText(iface_info['pubkey'])
+            if iface_info.get('port'):
+                self.lbl_port.setText(iface_info['port'])
+            # Peer fields
+            if peer_info.get('pubkey'):
+                self.lbl_peer_key.setText(peer_info['pubkey'])
+            if peer_info.get('allowed_ips'):
+                self.lbl_allowed_ips.setText(peer_info['allowed_ips'])
+            if peer_info.get('endpoint'):
+                self.lbl_endpoint.setText(peer_info['endpoint'])
+            if peer_info.get('handshake'):
+                self.lbl_handshake.setText(peer_info['handshake'])
+            if peer_info.get('transfer'):
+                self.lbl_transfer.setText(peer_info['transfer'])
         # --- Interface Status Dot: Aqua-Style ---
         DOT_SIZE = 12
         DOT_GREEN = "#019601"
@@ -1229,35 +1333,6 @@ class WGGui(QWidget):
         self.status_text.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.status_text.setMinimumHeight(ROW_HEIGHT)
         self.status_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-
-        if utun_iface:
-            try:
-                out = subprocess.check_output([PRIV_ESC, 'wg', 'show', utun_iface]).decode()
-                iface, peer = {}, {}
-                for line in out.splitlines():
-                    line = line.strip()
-                    if line.lower().startswith("interface:"):
-                        iface['name'] = line.split(":", 1)[1].strip()
-                    elif line.startswith("public key:"):
-                        iface['pubkey'] = line.split(":", 1)[1].strip()
-                    elif line.startswith("listening port:"):
-                        iface['port'] = line.split(":", 1)[1].strip()
-                    elif line.startswith("peer:"):
-                        peer['pubkey'] = line.split(":", 1)[1].strip()
-                    elif line.startswith("endpoint:"):
-                        peer['endpoint'] = line.split(":", 1)[1].strip()
-                    elif line.startswith("allowed ips:"):
-                        peer['allowed_ips'] = line.split(":", 1)[1].strip()
-                    elif line.startswith("latest handshake:"):
-                        peer['handshake'] = line.split(":", 1)[1].strip()
-                    elif line.startswith("transfer:"):
-                        peer['transfer'] = line.split(":", 1)[1].strip()
-                self.lbl_pubkey.setText(iface.get('pubkey', "-"))
-                self.lbl_port.setText(iface.get('port', conf_port) or "-")
-                self.lbl_handshake.setText(peer.get('handshake', "-"))
-                self.lbl_transfer.setText(peer.get('transfer', "-"))
-            except Exception:
-                pass
         self.interface_up = bool(utun_iface)
         self.update_tray_icon()
     # --- Connect, Disconnect, and Toggle Logic ---
@@ -1295,7 +1370,8 @@ class WGGui(QWidget):
         self.process.readyReadStandardOutput.connect(self.on_stdout)
         self.process.readyReadStandardError.connect(self.on_stderr)
         self.process.finished.connect(self.on_connect_finished)
-        self.process.start(PRIV_ESC, [WG_MULTI_SCRIPT, 'up', f"{prof}.conf"])
+        prog, args = build_qprocess_args([WG_MULTI_SCRIPT, 'up', f"{prof}.conf"])
+        self.process.start(prog, args)
 
     def on_connect_finished(self):
         prof = getattr(self, "pending_connect_profile", None)
@@ -1371,7 +1447,8 @@ class WGGui(QWidget):
             self.refresh_status()
 
         self.process.finished.connect(finished_cb)
-        self.process.start(PRIV_ESC, [WG_MULTI_SCRIPT, "down", f"{prof}.conf"])
+        prog, args = build_qprocess_args([WG_MULTI_SCRIPT, "down", f"{prof}.conf"])
+        self.process.start(prog, args)
 
     def on_disconnect_all(self):
         # Disconnect all WireGuard profiles (best effort), blocking until each is down
@@ -1379,7 +1456,7 @@ class WGGui(QWidget):
             prof = os.path.splitext(os.path.basename(conf_path))[0]
             try:
                 self.append_log(f"🛑 Disconnecting {prof}...\n")
-                subprocess.run([PRIV_ESC, WG_MULTI_SCRIPT, 'down', f"{prof}.conf"], check=False)
+                run_priv([WG_MULTI_SCRIPT, 'down', f"{prof}.conf"], check=False)
             except Exception as e:
                 self.append_log(f"⚠ Error disconnecting {prof}: {e}\n")
 
@@ -1480,7 +1557,7 @@ class WGGui(QWidget):
                 with tempfile.NamedTemporaryFile("w", delete=False) as tmpf:
                     tmpf.write(new_text)
                     tmp_path = tmpf.name
-                subprocess.run([PRIV_ESC, "cp", tmp_path, conf_path])
+                run_priv(["cp", tmp_path, conf_path], check=True)
                 os.remove(tmp_path)
                 self.log.append(f"✅ Saved changes to {prof}.conf\n")
             except Exception as e:
@@ -1519,7 +1596,7 @@ DNS =
                     tmp_path = tmpf.name
 
                 # Move it with doas/sudo
-                subprocess.run([PRIV_ESC, "mv", tmp_path, conf_path], check=True)
+                run_priv(["mv", tmp_path, conf_path], check=True)
                 self.log.append(f"✅ Created profile: {prof}.conf\n")
                 self.load_profiles()
             except Exception as e:
@@ -1543,7 +1620,7 @@ DNS =
 
         if reply == QMessageBox.StandardButton.Yes:
             try:
-                subprocess.run([PRIV_ESC, "rm", "-f", conf_path], check=True)
+                run_priv(["rm", "-f", conf_path], check=True)
                 self.log.append(f"🗑️ Deleted profile: {prof}\n")
                 self.load_profiles()
             except Exception as e:
