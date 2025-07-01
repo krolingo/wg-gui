@@ -7,8 +7,6 @@ MAPPING_FILE="/tmp/wg-multi/wg-utun.map"
 
 mkdir -p "$STATE_DIR"
 
-DEFAULT_SEARCH_DOMAINS="xmcnetwork.com eldapper.com ici.com genius2go.com patmcgrath.com lan"
-
 usage() {
   echo "Usage: $0 up|down|list profile.conf"
   exit 1
