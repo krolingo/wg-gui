@@ -68,6 +68,7 @@ bring_up() {
     doas route add -host "$SERVER_IP" "$LAN_GW"
   fi
 
+
 grep -A 10 '\[Peer\]' "$PROFILE_PATH" | grep '^AllowedIPs' | awk -F= '{print $2}' | tr ',' '\n' | while read ip; do
   ip=$(echo "$ip" | xargs)  # Trim whitespace
   [ -n "$ip" ] || continue  # Skip empty lines
@@ -75,6 +76,14 @@ grep -A 10 '\[Peer\]' "$PROFILE_PATH" | grep '^AllowedIPs' | awk -F= '{print $2}
   echo "🛣 Adding route for $ip via $INTERFACE"
 
   if [ "$ip" = "0.0.0.0/0" ]; then
+    # 🌐 Preserve local subnets before hijacking default route
+    LAN_GW=$(netstat -rn | awk '$1=="default" { print $2; exit }')
+    if [ -n "$LAN_GW" ]; then
+      netstat -rn -f inet | awk -v gw="$LAN_GW" '$2 == gw && $1 ~ /^[0-9]+\./ { print $1 }' | while read -r subnet; do
+        echo "↳ Preserving $subnet via $LAN_GW"
+        doas route add -net "$subnet" "$LAN_GW"
+      done
+    fi
     ORIGINAL_DEFAULT=$(netstat -rn | awk '$1=="default" { print $2; exit }')
     if [ -n "$ORIGINAL_DEFAULT" ]; then
       echo "$ORIGINAL_DEFAULT" | doas tee "$STATE_DIR/default.route.${INTERFACE}" > /dev/null
@@ -90,12 +99,12 @@ done
 
   DNS_LINE=$(grep -m1 '^DNS[ 	]*=' "$PROFILE_PATH" | cut -d= -f2- | xargs)
   SEARCH_LINE=$(grep -m1 '^SearchDomains[ 	]*=' "$PROFILE_PATH" | cut -d= -f2- | xargs)
-  [ -z "$SEARCH_LINE" ] && SEARCH_LINE="$DEFAULT_SEARCH_DOMAINS"
+  [ -z "$SEARCH_LINE" ] && SEARCH_LINE=""
   if [ -n "$DNS_LINE" ]; then
     echo "🌐 Backing up /etc/resolv.conf and setting DNS: $DNS_LINE"
     doas cp /etc/resolv.conf "$STATE_DIR/resolv.conf.${INTERFACE}.bak"
     {
-      echo "search $SEARCH_LINE"
+      [ -n "$SEARCH_LINE" ] && echo "search $SEARCH_LINE"
       echo "$DNS_LINE" | tr ',' '
 ' | sed 's/^/nameserver /'
     } | doas tee /etc/resolv.conf > /dev/null

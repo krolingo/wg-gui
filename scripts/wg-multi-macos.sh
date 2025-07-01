@@ -181,11 +181,22 @@ bring_up() {
       fi
     done
 
-  DNS_LINE=$(grep -m1 '^DNS[ 	]*=' "$PROFILE_PATH" | cut -d= -f2 | xargs)
+  DNS_LINE=$(grep -m1 '^DNS[ 	]*=' "$PROFILE_PATH" | cut -d= -f2- | tr -d '\r' | xargs)
   if [ -n "$DNS_LINE" ]; then
-    echo "🌐 Backing up /etc/resolv.conf and setting DNS: $DNS_LINE"
-    ${ESC_CMD} cp /etc/resolv.conf "$STATE_DIR/resolv.conf.${UTUN_IFACE}.bak"
-    echo "nameserver $DNS_LINE" | ${ESC_CMD} tee /etc/resolv.conf > /dev/null
+      echo "🌐 Backing up /etc/resolv.conf and setting DNS entries: $DNS_LINE"
+      ${ESC_CMD} cp /etc/resolv.conf "$STATE_DIR/resolv.conf.${UTUN_IFACE}.bak"
+      DNS_OUTPUT=""
+      SEARCH_OUTPUT=""
+      IFS=',' read -r -a dns_array <<< "$DNS_LINE"
+      for entry in "${dns_array[@]}"; do
+          trimmed=$(echo "$entry" | tr -d '\r' | xargs)
+          if echo "$trimmed" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+              DNS_OUTPUT+="nameserver $trimmed"$'\n'
+          else
+              SEARCH_OUTPUT+="search $trimmed"$'\n'
+          fi
+      done
+      echo -n "$SEARCH_OUTPUT$DNS_OUTPUT" | ${ESC_CMD} tee /etc/resolv.conf > /dev/null
   fi
 
   # ▶ Execute any PostUp commands defined in the profile
