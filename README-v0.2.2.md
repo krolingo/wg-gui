@@ -195,11 +195,6 @@ This project was created to:
 
 ---
 
-## License
-
-MIT License
----
-
 ## What’s New in v0.2.2
 
 This version reintroduces two new helper scripts:
@@ -253,4 +248,11 @@ Released: (2025-06-22)
 - `get_ssid.py` (in `tools/MacOS/`) provides a programmable way to detect connected Wi-Fi SSID via `CoreWLAN`.
 
 ---
+
+## License
+
+MIT License
+---
+
 </file>
+
