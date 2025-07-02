@@ -1,4 +1,5 @@
-<file name=0 path=/Users/mcapella/Development/GITHUB/wg-gui/README-v0.2.2.md># WireGuard GUI Client for FreeBSD & macOS
+# WireGuard GUI Client for FreeBSD & macOS
+<file name=0 path=/Users/mcapella/Development/GITHUB/wg-gui/README-v0.2.2.md>
 
 ![Screenshot](images/wg-gui-screens-FreeBSD.png)
 ![Screenshot](images/wg-gui-screens-MacOS.png)
