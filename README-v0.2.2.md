@@ -1,4 +1,4 @@
-# WireGuard GUI Client for FreeBSD & macOS
+<file name=0 path=/Users/mcapella/Development/GITHUB/wg-gui/README-v0.2.2.md># WireGuard GUI Client for FreeBSD & macOS
 
 ![Screenshot](images/wg-gui-screens-FreeBSD.png)
 ![Screenshot](images/wg-gui-screens-MacOS.png)
@@ -71,7 +71,7 @@ A PyQt6-based graphical interface for managing multiple WireGuard VPN profiles. 
 
 ## all_traffic Hooks
 
-Custom per-profile `PostUp` and `PostDown` scripts can be set (see your `.conf`), commonly pointing to `all_traffic_post_up.sh` and `all_traffic_post_down.sh`.
+Custom per-profile `PostUp` and `PostDown` scripts can be set (see your `.conf`), commonly pointing to `all_traff_post_up.sh` and `all_traff_post_down.sh`, which are now bundled with the app.
 
 These scripts are typically used to:
 - Set DNS safely and restore it on disconnect.
@@ -81,8 +81,8 @@ These scripts are typically used to:
 **Example:**
 ```ini
 [Interface]
-PostUp = /usr/local/etc/wireguard/scripts/all_traffic_post_up.sh
-PostDown = /usr/local/etc/wireguard/scripts/all_traffic_post_down.sh
+PostUp = /usr/local/etc/wireguard/scripts/all_traff_post_up.sh
+PostDown = /usr/local/etc/wireguard/scripts/all_traff_post_down.sh
 ```
 
 ---
@@ -199,6 +199,27 @@ This project was created to:
 MIT License
 ---
 
+## What’s New in v0.2.2
+
+This version reintroduces two new helper scripts:
+
+- `all_traff_post_up.sh`: Ensures all WireGuard interfaces route full traffic correctly and re-establishes LAN routes that may be overridden by 0.0.0.0/0 tunnels.
+- `all_traff_post_down.sh`: Gracefully removes all WireGuard interfaces and cleans up corresponding default and LAN routes.
+
+These scripts are especially helpful on FreeBSD and macOS systems that may lose or override routes when using full-tunnel VPNs.
+
+### Bug Fix: ZIP timestamp error workaround
+- In the download_profiles() function, this block was added to prevent errors like:
+- `⚠ Failed to create ZIP archive: ZIP does not support timestamps before 1980`
+
+```javascript
+now = time.time()
+st = os.stat(full_path)
+if st.st_mtime < 315532800:  # Jan 1, 1980
+    os.utime(full_path, (now, now))
+```
+
+
 ## 📦 Version 0.2.1 – Changelog
 
 Released: (2025-06-22)
@@ -221,6 +242,8 @@ Released: (2025-06-22)
 | `routing_flush.sh`| Cross-platform script to delete default routes and reacquire DHCP or reset routing state. |
 | `CheckRoutes.sh`  | Audits current routing table to ensure that required tunnels (especially 0.0.0.0/0) are active and prioritized. |
 | `Troll.sh`        | A humorous script that simulates terminal output — use it for stress testing or fun. |
+| `all_traff_post_up.sh`   | Detects all active WireGuard interfaces and re-adds LAN routes that may have been overridden by default tunnel routes. |
+| `all_traff_post_down.sh` | Tears down all active WireGuard interfaces and removes associated default routes and LAN routes to restore local network integrity. |
 
 ### Development Enhancements
 - All helper scripts now resolve platform-specific tool paths.
@@ -229,3 +252,4 @@ Released: (2025-06-22)
 - `get_ssid.py` (in `tools/MacOS/`) provides a programmable way to detect connected Wi-Fi SSID via `CoreWLAN`.
 
 ---
+</file>

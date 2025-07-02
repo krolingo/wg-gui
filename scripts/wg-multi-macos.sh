@@ -70,10 +70,14 @@ fi
 PROFILE_DIR="/usr/local/etc/wireguard/profiles"
 STATE_DIR="/tmp/wg-multi"
 mkdir -p "$STATE_DIR"
+# Save default gateway once if not already recorded
+ORIG_GW_FILE="$STATE_DIR/original_default_gateway"
+if [ ! -s "$ORIG_GW_FILE" ]; then
+  CURRENT_GW=$(route -n get default 2>/dev/null | awk '/gateway/ {print $2}')
+  echo "$CURRENT_GW" > "$ORIG_GW_FILE"
+fi
 BASE_IFNUM=2
 MAPPING_FILE="/tmp/wg-multi/wg-utun.map"
-
-mkdir -p "$STATE_DIR"
 
 usage() {
   echo "Usage: $0 up|down|list profile.conf"
@@ -250,7 +254,7 @@ bring_down() {
   fi
 
   ORIG_GATEWAY_FILE="$STATE_DIR/original_default_gateway"
-  if [ -f "$ORIG_GATEWAY_FILE" ]; then
+  if [ -s "$ORIG_GATEWAY_FILE" ]; then
     DEFAULT_GW=$(cat "$ORIG_GATEWAY_FILE")
     echo "🛣 Restoring original default route via $DEFAULT_GW"
     ${ESC_CMD} route add default "$DEFAULT_GW"

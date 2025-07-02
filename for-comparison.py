@@ -1640,17 +1640,10 @@ DNS =
         if not file_path:
             return
         try:
-            now = time.time()
             with zipfile.ZipFile(file_path, 'w') as zipf:
                 for conf in os.listdir(WG_DIR):
                     if conf.endswith(".conf"):
                         full_path = os.path.join(WG_DIR, conf)
-                        try:
-                            st = os.stat(full_path)
-                            if st.st_mtime < 315532800:  # Jan 1, 1980
-                                os.utime(full_path, (now, now))
-                        except Exception as e:
-                            self.log.append(f"⚠ Failed to sanitize mtime for {conf}: {e}\n")
                         zipf.write(full_path, arcname=conf)
             self.log.append(f"📦 Downloaded all profiles to {file_path}\n")
         except Exception as e:
